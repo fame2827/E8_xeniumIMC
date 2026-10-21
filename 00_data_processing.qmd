@@ -1,0 +1,528 @@
+---
+title: "postXenium_processing"
+format: html
+editor: source
+---
+
+# Setup
+
+```{r}
+library(tidyverse)
+library(tidySingleCellExperiment)
+library(MoleculeExperiment)
+library(cytomapper)
+library(SpatialExperiment)
+
+library(sf)
+library(raster)
+library(terra)
+library(cytomapper)
+library(lisaClust)
+library(simpleSeg)
+library(FuseSOM)
+
+library(scater)
+library(Banksy)
+library(scran)
+library(igraph)
+
+select = dplyr::select
+```
+
+# Reading data
+
+```{r}
+# Xenium images
+xenium_image = MoleculeExperiment::readXenium("/dskh/nobackup/biostat/datasets/ruth_xenium_melanoma/output-XETG00179__0027870__Region_4__20240307__072513/")
+
+
+# IMC images
+imc_image = terra::rast("/dskh/nobackup/biostat/datasets/ruth_xenium_melanoma/IMC_70_4_aligned/RegisteredIMC_E8_20250717_ED.tif")
+
+imcChannels = read_csv("/dskh/nobackup/biostat/datasets/ruth_xenium_melanoma/IMC_70_4_aligned/Channels.csv") |> 
+  mutate(Marker = ifelse(grepl("_", Marker), sub(".*_(.*)", "\\1", Marker), Marker))
+
+# remove nonsense channels
+imc_image = imc_image[[1:47]] 
+
+
+names(imc_image) = imcChannels$Marker
+
+
+# Image Coordinates
+imageCoords = readxl::read_xlsx("/dskh/nobackup/biostat/datasets/ruth_xenium_melanoma/imageCoords.xlsx") |> 
+  filter(Slide == "70_4") # filtering to slide 70_4 for now
+```
+
+# Prepping imc images
+
+## Converting Xenium transcript coordinates to Dapi coordinates.
+
+```{r}
+# found in the experiment.xenium file.
+# Convert xenium transcript coords to dapi coords
+xeniumScaleFactor = 0.2125
+
+E8_coords = imageCoords |> 
+    dplyr::filter(ImageID == "E8")
+
+imcY = ext(imc_image)$ymax
+imcX = ext(imc_image)$xmax
+
+xmin = E8_coords$xmin / xeniumScaleFactor
+xmax = E8_coords$xmax / xeniumScaleFactor
+
+# Flip imc image upside down
+ymin = E8_coords$ymin / xeniumScaleFactor
+ymax = E8_coords$ymax / xeniumScaleFactor
+
+# Crop E8 Image
+E8_extent = terra::ext(xmin, xmax, ymin, ymax)
+
+E8_raster = terra::crop(imc_image, y = E8_extent)
+
+# Convert to EBImage
+E8_array = as.array(E8_raster)
+
+E8_image = EBImage::Image(E8_array)
+
+#saveRDS(E8_image, "E8_raw/E8_raw_image.rds")
+```
+
+
+## E8 Molecule experiment object
+
+```{r}
+E8_coords = imageCoords |> 
+  dplyr::filter(ImageID == "E8")
+  
+subset_extent = c(
+  xmin = E8_coords$xmin,
+  xmax = E8_coords$xmax,
+  ymin = E8_coords$ymin,
+  ymax = E8_coords$ymax
+)
+
+E8_me = subset_by_extent(xenium_image, subset_extent)
+
+names(E8_me@molecules$detected) = "E8"
+names(E8_me@boundaries$cell) = "E8"
+
+# Rename cell ids
+names(E8_me@boundaries$cell[["E8"]]) = 1:length(names(E8_me@boundaries$cell[["E8"]]))
+```
+
+
+## E8 mask
+```{r}
+boundries_list = E8_me@boundaries$cell[["E8"]]
+
+
+# Convert boundries to polygons
+polygons = lapply(boundries_list, function(df) {
+  mat = as.matrix(df)
+  return(st_polygon(list(mat)))
+})
+
+polygon_data = st_sf(cell_name = as.numeric(names(boundries_list)), geometry = polygons)
+
+raster_extent = raster::extent(subset_extent)
+
+# Create raster image
+rasterLayer = raster(raster_extent, res = 1) 
+rasterImage = fasterize::fasterize(polygon_data, rasterLayer, field = "cell_name") 
+
+# Convert image to EBImage
+labelMat = as.matrix(rasterImage)
+labelMat[is.na(labelMat)] = 0  
+E8_mask = Image(labelMat, colormode = "Grayscale")
+
+
+```
+
+# Creating SCE objects
+
+
+## Xenium
+
+```{r}
+
+E8_xenium = MoleculeExperiment::countMolecules(E8_me)
+
+# Avoids conflict with ME and tidySingleCellExperiment
+E8_xenium$x_location = NULL
+E8_xenium$y_location = NULL
+
+E8_xenium = E8_xenium |> 
+  mutate(imageCellID = sub(".*\\.", "", cell_id))
+```
+
+
+
+## IMC
+
+```{r fig.height = 10}
+
+width = dim(E8_mask)[1]
+height = dim(E8_mask)[2]
+
+#E8_flipped = flop(E8_image)
+E8_resized = EBImage::resize(E8_image, w = width, h = height)
+
+# 
+# writeImage(E8_mask, "/dskh/nobackup/farhana/proj-radiotherapyIMC/Post Xenium/aligned_imc/E8_raw/E8_mask.tiff")
+# writeImage(E8_resized, "/dskh/nobackup/farhana/proj-radiotherapyIMC/Post Xenium/aligned_imc/E8_raw/E8_image.tiff")
+
+E8_mask = readImage("E8_raw/E8_mask.tiff")
+E8_resized = readImage("E8_raw/E8_image.tiff")
+
+# Setting up cytoimageList for E8
+E8_cyto = CytoImageList(E8_resized)
+mcols(E8_cyto)$imageID = "E8"
+names(E8_cyto) = "E8"
+channelNames(E8_cyto) = imcChannels$Marker
+
+
+# CytoImageList for E8 mask
+E8Mask_cyto = CytoImageList(E8_mask)
+names(E8Mask_cyto) = "E8" 
+mcols(E8Mask_cyto)$imageID = "E8"
+
+
+
+
+# saveRDS(E8_cyto,"E8_raw/E8_cyto.rds")
+# saveRDS(E8Mask_cyto, "E8_raw/E8Mask_cyto.rds")
+#E8Mask_cyto = readRDS("E8_raw/E8Mask_cyto.rds")
+
+cytomapper::plotPixels(image = E8_cyto["E8"], 
+           mask = E8Mask_cyto["E8"],
+           img_id = "imageID", 
+           colour_by = c("CD4"), 
+           display = "single",
+           colour = list(CD4 = c("black","blue")),
+           legend = NULL,
+           bcg = list(CD4 = c(0,1,1)) )
+
+
+
+cytomapper::plotPixels(image = E8_cyto["E8"], 
+           mask = E8Mask_cyto["E8"],
+           img_id = "imageID", 
+           colour_by = c("DNA2"), 
+           display = "single",
+           colour = list(DNA2 = c("black","blue")),
+           legend = NULL,
+           bcg = list(DNA2 = c(0,1,1)) )
+
+
+test = E8_resized[, , 44]
+
+test@.Data = test@.Data/quantile(test@.Data, 0.9)
+
+test |> display()
+```
+
+
+```{r}
+E8_imc_sce <- cytomapper::measureObjects(
+  E8Mask_cyto,
+  E8_cyto,
+  img_id = "imageID",
+  return_as = "sce",
+  BPPARAM = BiocParallel::MulticoreParam(workers = 30))
+
+
+E8_imc_sce = E8_imc_sce |> 
+  dplyr::rename(
+    "x" = "m.cx",
+    "y"= "m.cy",
+    "imageCellID" = "object_id") |> 
+  select(.cell, imageID, imageCellID, x, y)
+
+
+colnames(E8_imc_sce) = paste("E8", colnames(E8_imc_sce), sep = ".")
+
+names(assays(E8_imc_sce)) = "protein_intensities"
+
+
+E8_xenium <- SingleCellExperiment(
+  colData = colData(E8_imc_sce),
+  assays = list(transcript_counts = assay(E8_xenium, "counts")[, colnames(E8_imc_sce)]))
+
+#saveRDS(E8_imc_sce, "rds_data/E8_imc.rds")
+#saveRDS(E8_xenium, "rds_data/E8_xenium.rds")
+```
+
+
+# Cell Typing
+
+
+## IMC 
+```{r}
+E8_imc = readRDS("rds_data/E8_imc.rds")
+
+
+clusterMarkers = c(
+  "CD11c",
+  # "CD16", # Myeloid marker
+  "CD68",
+  #"panCK", # Epithelial cells, not really expected in E8
+  "CD20",
+  "CD8a",
+  "podoplanin",
+  "CD14",
+  "FX111A",
+  # "FoxP3", # CD4 transcript marker, not very highly expressed
+  "CD45",
+  "CD66a",
+  "CD3",
+  "anti-cy5", #SOX10 tumour marker
+  "HLADR",
+  "CD4",
+  # "CD56",
+  "CD31"
+)
+
+
+useMarkers = rownames(E8_imc)[!(rownames(E8_imc) %in% c("80ArAr", "104Pd", "HH3", "189Os", "190Os", "DNA1", "DNA2", "208Pb"))]
+```
+
+```{r}
+E8_imc <- FuseSOM::estimateNumCluster(E8_imc, kSeq = 2:30)
+FuseSOM::optiPlot(E8_imc, method = "gap")
+```
+
+```{r }
+
+# Transform and normalise the marker expression of each cell type.
+E8_imc <- normalizeCells(E8_imc,
+                        markers = useMarkers,
+                        transformation = NULL, # either asinh or sqrt
+                        method = c( "PC1",  "trim99", "minMax"),
+                        assayIn = "protein_intensities",
+                        cores = 10)
+
+
+E8_imc |> 
+  join_features(features = useMarkers, shape = "long", assay = "protein_intensities") |> 
+  ggplot(aes(x = .abundance_protein_intensities)) + 
+  geom_density() + 
+  facet_wrap(~.feature) +
+  theme(legend.position = "none") +
+  theme_classic()
+
+E8_imc |> 
+  join_features(features = useMarkers, shape = "long", assay = "norm") |> 
+  ggplot(aes(x = .abundance_norm)) + 
+  geom_density() + 
+  facet_wrap(~.feature) +
+  theme(legend.position = "none") +
+  theme_classic()
+
+
+# Set seed.
+set.seed(51773)
+
+# Generate SOM and cluster cells into 10 groups
+E8_imc <- FuseSOM::runFuseSOM(
+  E8_imc,
+  markers = clusterMarkers,
+  assay = "norm",
+  numClusters = 10
+)
+
+
+scater::plotGroupedHeatmap(
+  E8_imc,
+  features = clusterMarkers,
+  group = "clusters",
+  exprs_values = "norm",
+  
+  center = TRUE,
+  scale = TRUE,
+  zlim = c(-3, 3),
+  cluster_rows = FALSE,
+  block = "clusters"
+) 
+
+
+```
+
+```{r}
+
+E8_imc |> 
+  join_features(rownames(E8_imc), shape = "wide", assay = "protein_intensities") |>
+  arrange(CD3) |> 
+  ggplot(aes(x = x, y = y, col = CD3)) +
+  geom_point() +
+  scale_colour_viridis_c()
+
+E8_imc |> 
+  join_features(rownames(E8_imc), shape = "wide", assay = "protein_intensities") |>
+  arrange(CD20) |> 
+  ggplot(aes(x = x, y = y, col = CD20)) +
+  geom_point() +
+  scale_colour_viridis_c()
+
+
+E8_imc |> 
+  join_features(rownames(E8_imc), shape = "wide", assay = "protein_intensities") |>
+  arrange(DNA1) |> 
+  ggplot(aes(x = x, y = y, col = DNA1)) +
+  geom_point() +
+  scale_colour_viridis_c()
+```
+
+
+```{r}
+p = E8_imc |> 
+  ggplot(aes(x = x, y =y, col = clusters)) +
+  geom_point(size = 0.5)
+
+
+plotly::ggplotly(p)
+```
+
+
+```{r}
+E8_imc = E8_imc |> 
+  mutate(cellTypeProtein = case_when(
+    clusters == "cluster_3" ~ "endothelial",
+    clusters == "cluster_5" ~ "dc",
+    clusters == "cluster_4" ~ "tumour1",
+    clusters == "cluster_1" ~ "tumour2",
+    clusters == "cluster_2" ~ "fibroblast",
+    clusters == "cluster_10" ~ "b",
+    clusters == "cluster_7" ~ "lymphatic",
+    clusters == "cluster_6" ~ "cd8t",
+    clusters == "cluster_8" ~ "cd4t",
+    clusters == "cluster_9" ~ "unidentified"
+  )) 
+
+
+#saveRDS(E8_imc, "data/E8_imc.rds")
+
+
+```
+
+## Xenium 
+
+
+```{r}
+E8_xenium = readRDS("rds_data/E8_xenium.rds")
+
+# There are 119 cells with no trancripts
+table(colSums(assay(E8_xenium)) == 0)
+
+zeroCells = names(which(colSums(assay(E8_xenium)) == 0))
+
+
+E8_xenium = E8_xenium |> 
+  filter(!(.cell %in% zeroCells))
+
+E8_xenium = scater::logNormCounts(E8_xenium, assay.type = "transcript_counts")
+
+
+pattern <- "^(NegControlCodeword|NegControlProbe|UnassignedCodeword)"
+neg_idx <- grepl(pattern, rownames(E8_xenium))
+
+E8_xenium_no_negative = E8_xenium[!neg_idx, ]
+```
+
+```{r}
+
+
+E8_xenium_spe = SpatialExperiment(
+  assays = assays(E8_xenium_no_negative),        
+  rowData = rowData(E8_xenium_no_negative),       
+  colData = colData(E8_xenium_no_negative),       
+  spatialCoords = as.matrix(select(E8_xenium_no_negative, x, y))
+)
+
+
+set.seed(51773)
+
+clusters = clustSIGNAL::clustSIGNAL(E8_xenium_spe, "imageID", outputs = "c")
+
+
+E8_xenium_no_negative = E8_xenium_no_negative |> 
+  left_join(clusters$clusters, join_by(".cell" == "Cells"))
+
+
+
+plot = scater::plotGroupedHeatmap(
+  E8_xenium_no_negative,
+  features = rownames(E8_xenium_no_negative),
+  group = "Clusters",
+  exprs_values = "logcounts",
+  center = TRUE,
+  scale = TRUE,
+  zlim = c(-3, 3),
+  cluster_rows = TRUE,
+  block = "Clusters",
+  fontsize_row  = 8
+) 
+
+ggsave("clustSIGNAL_heatmap.pdf", plot, height = 40, width = 5)
+
+
+E8_xenium_no_negative |> 
+  ggplot(aes(x = x, y =y, col = Clusters)) +
+  geom_point(size = 0.4) +
+  theme_classic()
+
+E8_xenium_no_negative$Clusters |> table()
+
+```
+
+
+```{r}
+
+mgs = findMarkers(E8_xenium_no_negative, groups=E8_xenium_no_negative$Clusters, direction="up", assay.type = "logcounts")
+# select for a few markers per cluster
+top <- lapply(mgs, \(df) rownames(df)[df$Top <= 5])
+top
+
+
+```
+
+
+
+```{r}
+set.seed(51773)
+
+E8_xenium_no_negative = scater::runPCA(E8_xenium_no_negative)
+
+E8_xenium_no_negative = scater::runUMAP(E8_xenium_no_negative)
+
+scater::plotReducedDim(E8_xenium_no_negative, dimred = "UMAP", colour_by = "Clusters")
+```
+
+
+```{r}
+E8_xenium_no_negative = E8_xenium_no_negative |> 
+  mutate(cellTypeTranscript = case_when(
+    Clusters == 1 ~ "monocyte",
+    Clusters == 2 ~ "cd8t",
+    Clusters == 3 ~ "macrophage",
+    Clusters == 4 ~ "b",
+    Clusters == 5 ~ "tumour",
+    Clusters == 6 ~ "tcell",
+    Clusters == 7 ~ "fibroblast",
+    Clusters == 8 ~ "endothelial",
+    Clusters == 9 ~ "cd4t",
+    
+  ))
+
+
+
+```
+
+
+
+```{r}
+saveRDS(E8_xenium_no_negative, "data/E8_xenium.rds")
+```
+
+

@@ -1,0 +1,1512 @@
+---
+title: "postXenium_mask_analysis"
+format: html
+editor: visual
+---
+
+# Setup
+
+```{r}
+library(tidyverse)
+library(tidySingleCellExperiment)
+library(MoleculeExperiment)
+library(cytomapper)
+library(SpatialExperiment)
+
+library(sf)
+library(raster)
+library(terra)
+library(cytomapper)
+library(lisaClust)
+library(simpleSeg)
+library(FuseSOM)
+
+library(scater)
+library(Banksy)
+library(scran)
+library(igraph)
+
+library(iVISTA)
+library(EBImage)
+select = dplyr::select
+
+theme_set(theme_classic())
+library(patchwork)
+```
+
+# Loading masks
+
+```{r}
+
+E8_cyto = readRDS("E8_raw/E8_cyto.rds") # Registered IMC data
+xeniumMask = readRDS("E8_raw/E8Mask_cyto.rds") # Xenium mask
+
+E8_raw_image <- readRDS("/dskh/nobackup/farhana/proj-radiotherapyIMC/Post Xenium/aligned_imc/E8_raw/E8_raw_image.rds") # Raw IMC data unregistered
+
+E8_imc <- readRDS("/dskh/nobackup/farhana/proj-radiotherapyIMC/Post Xenium/aligned_imc/data/E8_imc.rds") # IMC SCE object
+E8_xenium <- readRDS("/dskh/nobackup/farhana/proj-radiotherapyIMC/Post Xenium/aligned_imc/data/E8_xenium.rds") # XENIUM SCE object.
+
+
+E8_imc = E8_imc[, colnames(E8_xenium)]
+all(colnames(E8_imc) == colnames(E8_xenium))
+```
+
+```{r}
+cytomapper::plotPixels(
+  image = E8_cyto["E8"],
+  img_id = "imageID",
+  colour_by = c("HH3", "DNA1", "DNA2"),
+  display = "single",
+  legend = NULL,
+  colour = list(
+    DNA1 = c("black", "purple"),
+    DNA2 = c("black","blue"),
+    HH3 = c("black", "red")),
+  bcg = list(
+    DNA1 = c(1, 1.5, 1.5),
+    DNA2 = c(1, 2, 1.5),
+    HH3 = c(1, 2, 1.5))
+)
+```
+
+# Examining tumour cell types
+
+```{r}
+
+cytomapper::plotCells(
+  mask         = xeniumMask,
+  object       = E8_xenium,
+  img_id       = "imageID",
+  cell_id      = "imageCellID",
+  colour_by    = "cellTypeTranscript",
+  exprs_values = "transcript_counts",   # assayNames(E8_xenium); needed even when colouring by colData
+  missing_colour = "grey20",
+  save_plot = list(filename = "/dskh/nobackup/farhana/proj-radiotherapyIMC/Post Xenium/aligned_imc/figures/registration_eval/rnaTypedCells.png")
+)
+
+cytomapper::plotCells(
+  mask         = xeniumMask,
+  object       = E8_imc,
+  img_id       = "imageID",
+  cell_id      = "imageCellID",
+  colour_by    = "cellTypeProtein",
+  exprs_values = "norm",   # assayNames(E8_xenium); needed even when colouring by colData
+  missing_colour = "grey20",
+  save_plot = list(filename = "/dskh/nobackup/farhana/proj-radiotherapyIMC/Post Xenium/aligned_imc/figures/registration_eval/proteinTypedCells.png")
+)
+```
+
+## Getting tumour cells classified by both modalities
+
+Tumours classified by transcript
+
+```{r}
+rnaTumourMask = xeniumMask
+tumourIDX = E8_xenium |> 
+  filter(cellTypeTranscript == "tumour") |> 
+  pull(imageCellID)
+
+
+rnaTumourMask[["E8"]][!rnaTumourMask[["E8"]] %in% tumourIDX]  = 0
+
+display(rnaTumourMask[["E8"]])
+```
+
+Tumours classified by protein
+
+```{r}
+protTumourMask = xeniumMask
+
+tumourIDX = E8_imc |> 
+  filter(cellTypeProtein %in% c("tumour1", "tumour2")) |> 
+  pull(imageCellID)
+
+
+protTumourMask[["E8"]][!protTumourMask[["E8"]] %in% tumourIDX]  = 0
+
+display(protTumourMask[["E8"]])
+
+```
+
+Overlap between protein tumour cell and rna tumour cells
+
+```{r}
+
+img_color <- channel(protTumourMask[["E8"]], "rgb")
+img_combined <- paintObjects(protTumourMask[["E8"]], tgt = img_color, col = "green", opac = c(1, 0))
+img_combined <- paintObjects(rnaTumourMask[["E8"]], tgt = img_combined, col = "magenta", opac = c(1, 0))
+display(img_combined, method = "raster")
+
+
+# Binarise (label masks -> presence/absence)
+imc_bin = protTumourMask[["E8"]] > 0
+xen_bin = rnaTumourMask[["E8"]] > 0
+
+imc_only = imc_bin & !xen_bin
+xen_only = xen_bin & !imc_bin
+overlap  = imc_bin & xen_bin
+
+# Build RGB composite: IMC=red, Xenium=green, overlap=yellow
+r = imc_only | overlap
+g = xen_only | overlap
+b = g
+b@.Data =  matrix(0, nrow = nrow(protTumourMask[["E8"]] ), ncol = ncol(protTumourMask[["E8"]] ))
+
+composite = rgbImage(red = r, green = g, blue = b)
+display(composite, method = "raster")
+```
+
+```{r}
+
+
+cytomapper::plotPixels(
+  image = E8_cyto["E8"],
+  mask = rnaTumourMask["E8"],
+  img_id = "imageID",
+  colour_by = c("anti-cy5"),
+  display = "single",
+  legend = NULL,
+  colour = list(`anti-cy5` = c("black", "purple")),
+  bcg = list(`anti-cy5` = c(5, 1.5, 2.5)),
+  image_title = list(text = "RNA tumour, anti-cy5")
+)
+
+
+cytomapper::plotPixels(
+  image = E8_cyto["E8"],
+  mask = protTumourMask["E8"],
+  img_id = "imageID",
+  colour_by = c("anti-cy5"),
+  display = "single",
+  legend = NULL,
+  colour = list(`anti-cy5` = c("black", "purple")),
+  bcg = list(`anti-cy5` = c(5, 1.5, 2.5) ),
+  image_title = list(text = "Protein tumour, anti-cy5")
+)
+
+
+```
+
+Show tumour transcripts
+
+```{r}
+
+markers = scran::findMarkers(
+  E8_xenium,
+  groups = E8_xenium$cellTypeTranscript,
+  test.type = "wilcox",      # rank-based, robust to outliers — standard for scRNA DE
+  direction = "up",          # only markers UP in each cluster, not down
+  pval.type = "all"          # gene must beat ALL other clusters, not just some — stricter, cleaner marker list
+)
+
+
+tumourMarkers = markers[["tumour"]] 
+
+topMarkers = tumourMarkers[order(tumourMarkers$FDR), ]
+head(data.frame(topMarkers), 10) |> 
+  rownames()
+
+
+
+
+```
+
+```{r}
+library(AUCell)
+
+topTumourMarkers = topMarkers |> 
+  head(10) |> 
+  rownames()
+
+cellRankings = AUCell_buildRankings(logcounts(E8_xenium), plotStats = FALSE)
+cellAUC = AUCell_calcAUC(list(tumourScore = topTumourMarkers), cellRankings)
+
+E8_xenium$tumourScore = as.numeric(getAUC(cellAUC)["tumourScore", ])
+```
+
+```{r}
+all(colnames(E8_xenium) == colnames(E8_imc))
+
+
+E8_xenium$cellTypeProtein = E8_imc$cellTypeProtein
+E8_imc$cellTypeTranscript = E8_xenium$cellTypeTranscript
+
+E8_xenium = E8_xenium |> 
+  mutate("isTranscriptTumour" = ifelse(cellTypeTranscript == "tumour", 1, 0),
+         "isProtTumour" = ifelse(cellTypeProtein %in% c("tumour1", "tumour2"), 1, 0))
+```
+
+```{r}
+tumourScoreImage = cytomapper::plotCells(
+  mask         = xeniumMask["E8"],
+  object       = E8_xenium,
+  img_id       = "imageID",
+  cell_id      = "imageCellID",
+  colour_by    = "tumourScore",
+  exprs_values = "logcounts", 
+  missing_colour = "grey20",
+  return_images = TRUE
+)
+
+cytomapper::plotCells(
+  mask         = rnaTumourMask["E8"],
+  object       = E8_xenium,
+  img_id       = "imageID",
+  cell_id      = "imageCellID",
+  colour_by    = "tumourScore",
+  exprs_values = "logcounts",   
+  missing_colour = "grey20",
+  image_title = list(text = "RNA tumour mask")
+)
+
+
+cytomapper::plotCells(
+  mask         = protTumourMask["E8"],
+  object       = E8_xenium,
+  img_id       = "imageID",
+  cell_id      = "imageCellID",
+  colour_by    = "tumourScore",
+  exprs_values = "logcounts",   
+  missing_colour = "grey20",
+  image_title = list(text = "Protein tumour mask")
+)
+
+
+
+
+```
+
+```{r}
+
+
+cytomapper::plotPixels(
+  image = E8_cyto["E8"],
+  mask = rnaTumourMask["E8"],
+  img_id = "imageID",
+  colour_by = c("anti-cy5"),
+  display = "single",
+  legend = NULL,
+  colour = list(`anti-cy5` = c("black", "purple")),
+  bcg = list(`anti-cy5` = c(5, 1.5, 2.5)),
+  image_title = list(text = "RNA classified tumours")
+)
+
+
+cytomapper::plotPixels(
+  image = E8_cyto["E8"],
+  mask = protTumourMask["E8"],
+  img_id = "imageID",
+  colour_by = c("anti-cy5"),
+  display = "single",
+  legend = NULL,
+  colour = list(`anti-cy5` = c("black", "purple")),
+  bcg = list(`anti-cy5` = c(5, 1.5, 2.5) ),
+  image_title = list(text = "Protein classified tumours")
+)
+
+img_color = tumourScoreImage$images[["E8"]]
+img_combined = paintObjects(rnaTumourMask[["E8"]], tgt = img_color, col = "white", opac = c(1, 0), thick = TRUE)
+display(img_combined, method = "raster")
+title(main = "RNA classified tumours", col.main = "white", line = 3)
+
+
+img_color = tumourScoreImage$images[["E8"]]
+img_combined = paintObjects(protTumourMask[["E8"]], tgt = img_color, col = "white", opac = c(1, 0), thick = TRUE)
+display(img_combined, method = "raster")
+title(main = "Protein classified tumours", col.main = "white", line = 3)
+```
+
+Tumours classified by transcript
+
+```{r}
+E8_imc$isTranscriptTumour = E8_xenium$isTranscriptTumour
+E8_imc$isProtTumour = E8_xenium$isProtTumour
+E8_imc$tumourScore = E8_xenium$tumourScore
+```
+
+```{r}
+E8_imc = E8_imc |> 
+  mutate(
+  tumourClassification = case_when(
+    isTranscriptTumour & isProtTumour ~ "Both",
+    !isTranscriptTumour & isProtTumour ~ "Protein",
+    isTranscriptTumour & !isProtTumour ~ "RNA",
+    TRUE ~ "other"
+  )
+) 
+
+E8_tumour = E8_imc |> 
+  filter(tumourClassification != "other")
+```
+
+```{r}
+bothTechTumourMask = xeniumMask
+
+tumourIDX = E8_tumour |> 
+  pull(imageCellID)
+
+bothTechTumourMask[["E8"]][!bothTechTumourMask[["E8"]] %in% tumourIDX]  = 0
+
+display(bothTechTumourMask[["E8"]])
+```
+
+```{r}
+tumourClassCol = c("Both" = "white", "Protein" = "yellow", "RNA" = "orange", "other" = NA)
+
+cytomapper::plotPixels(
+  image = E8_cyto["E8"],
+  mask = bothTechTumourMask["E8"],
+  object = E8_tumour,
+  img_id = "imageID",
+  cell_id = "imageCellID",
+  outline_by = "tumourClassification",
+  colour_by = c("anti-cy5"),
+  display = "single",
+  legend = NULL,
+  colour = list(
+    `anti-cy5` = c("black", "purple"),
+    tumourClassification = tumourClassCol),
+  bcg = list(`anti-cy5` = c(0, 1, 3.5) ),
+  thick = TRUE
+)
+
+legend("topright",
+       legend = names(tumourClassCol[!is.na(tumourClassCol)]),
+       fill = tumourClassCol[!is.na(tumourClassCol)],
+       xpd = TRUE,
+       cex = 0.7,
+       inset = c(0.194, 0.01),
+       x.intersp = 0.6,
+       y.intersp = 0.7)   
+
+
+
+```
+
+```{r}
+cytomapper::plotCells(
+  mask         = xeniumMask["E8"],
+  object       = E8_imc,
+  img_id       = "imageID",
+  cell_id      = "imageCellID",
+  outline_by = "tumourClassification",
+  colour_by = "tumourScore",
+  legend = NULL,
+  exprs_values = "norm", 
+  missing_colour = "grey20",
+  colour = list(tumourClassification = tumourClassCol),
+  thick = TRUE
+)
+
+legend("topright",
+       legend = names(tumourClassCol[!is.na(tumourClassCol)]),
+       fill = tumourClassCol[!is.na(tumourClassCol)],
+       xpd = TRUE,
+       cex = 0.7,
+       inset = c(0.194, 0.01),
+       x.intersp = 0.6,
+       y.intersp = 0.7) 
+
+```
+
+```{r}
+table(E8_imc$tumourClassification)
+```
+
+```{r}
+E8_imc = E8_imc |> 
+  mutate(cellTypeProteinUnified = ifelse(
+    cellTypeProtein %in% c("tumour1", "tumour2"), "tumour", cellTypeProtein
+  ))
+
+
+
+png("/dskh/nobackup/farhana/proj-radiotherapyIMC/Post Xenium/aligned_imc/figures/registration_eval/cellTypeLabelHeatmap.png", width = 1200, height = 1200, res = 300)
+
+heatmap(table(E8_imc$cellTypeTranscript, E8_imc$cellTypeProteinUnified), xlab = "RNA typed", ylab = "Protein typed", margins = c(8, 8))
+dev.off()
+
+
+table(E8_imc$cellTypeTranscript, E8_imc$cellTypeProteinUnified)
+```
+
+```{r}
+# Calculate F1 Score
+f1_score <- MLmetrics::F1_Score(E8_imc$isTranscriptTumour, E8_imc$isProtTumour)
+print(round(f1_score, digits = 2))
+
+
+# Calculate F1 Score
+f1_score <- MLmetrics::F1_Score(E8_imc$cellTypeTranscript == "b", E8_imc$cellTypeProtein == "b")
+print(f1_score)
+```
+
+```{r fig.height = 10}
+
+
+
+(E8_imc |> 
+  ggplot(aes(x = cellTypeTranscript, y = tumourScore)) +
+  geom_boxplot()  +
+  labs(y = "RNA tumour score", x = NULL) +
+
+E8_imc |> 
+  ggplot(aes(x = cellTypeProteinUnified, y = tumourScore)) +
+  geom_boxplot() +
+  labs(y = NULL, x = NULL) ) /
+
+(E8_imc |> 
+  join_features("anti-cy5", assay = "norm") |> 
+  ggplot(aes(x = cellTypeTranscript, y = anti.cy5)) +
+  geom_boxplot() +
+  labs(y = "Anti Cy5 expression", x = "Transcript cell type")  +
+
+E8_imc |> 
+  join_features("anti-cy5", assay = "norm") |> 
+  ggplot(aes(x = cellTypeProteinUnified, y = anti.cy5)) +
+  geom_boxplot() + 
+  labs(y = NULL, x = "Protein cell type")  
+)  & theme_classic() & theme(axis.title = element_text(size = 13, face = "bold"))
+```
+
+## Segmenting tumour cells
+
+```{r}
+
+imcTumourMask = simpleSeg::simpleSeg(
+  image = E8_cyto,
+  nucleus = c("anti-cy5"),
+  cores = 10,
+  transform = c("asinh"),
+  watershed = "intensity",
+  sizeSelection = 50,
+  smooth = 0.8
+)
+
+
+names(imcTumourMask) = c("E8")
+
+display(colorLabels(imcTumourMask[["E8"]]))
+
+
+#saveRDS(imcTumourMask, "/dskh/nobackup/farhana/proj-radiotherapyIMC/Post Xenium/aligned_imc/data/registration_evaluation/antiCy5Mask.rds")
+
+imcTumourMask = readRDS("/dskh/nobackup/farhana/proj-radiotherapyIMC/Post Xenium/aligned_imc/data/registration_evaluation/antiCy5Mask.rds")
+```
+
+```{r}
+cytomapper::plotPixels(
+  image = E8_cyto["E8"],
+  mask = imcTumourMask,
+  img_id = "imageID",
+  colour_by = c("anti-cy5"),
+  display = "single",
+  legend = NULL,
+  colour = list(
+    `anti-cy5` = c("black", "purple")),
+  bcg = list(
+    `anti-cy5` = c(0, 1, 3)
+),  image_title = list(text = NA))
+title(main = "Anti-cy5 mask, anti-cy5 expression", col.main = "white", line = 3)
+
+
+img_color = tumourScoreImage$images[["E8"]]
+img_combined = paintObjects(imcTumourMask[["E8"]], tgt = img_color, col = "white", opac = c(1, 0), thick = TRUE)
+display(img_combined, method = "raster")
+title(main = "Anti-cy5 mask, tumour score", col.main = "white", line = 3)
+```
+
+### Visualising tumour mask vs xenium masks
+
+```{r}
+
+img_color <- channel(rnaTumourMask[["E8"]], "rgb")
+img_color@.Data[] = 0
+img_combined <- paintObjects(rnaTumourMask[["E8"]], tgt = img_color, col = "magenta", opac = c(1, 0), thick = TRUE)
+img_combined <- paintObjects(imcTumourMask[["E8"]], tgt =  img_combined, col = "green", opac = c(1, 0), thick = TRUE)
+
+display(img_combined, method = "raster")
+#title(main = "RNA tumours", col.main = "white", line = 3)
+legend("topright",
+       legend = c("RNA tumours", "IMC tumour mask"),
+       fill = c("magenta", "green"),
+       xpd = TRUE,
+       cex = 0.7,
+       inset = c(0.194, 0.01),
+       x.intersp = 0.6,
+       y.intersp = 0.7)    
+
+
+img_color <- channel(protTumourMask[["E8"]], "rgb")
+img_color@.Data[] = 0
+img_combined <- paintObjects(protTumourMask[["E8"]], tgt = img_color, col = "magenta", opac = c(1, 0), thick = TRUE)
+img_combined <- paintObjects(imcTumourMask[["E8"]], tgt =  img_combined, col = "green", opac = c(1, 0), thick = TRUE)
+
+display(img_combined, method = "raster")
+#title(main = "RNA tumours", col.main = "white", line = 3)
+legend("topright",
+       legend = c("Protein tumours", "IMC tumour mask"),
+       fill = c("magenta", "green"),
+       xpd = TRUE,
+       cex = 0.7,
+       inset = c(0.194, 0.01),
+       x.intersp = 0.6,
+       y.intersp = 0.7)   
+
+```
+
+```{r}
+
+# Binarise (label masks -> presence/absence)
+imc_bin = imcTumourMask[["E8"]] > 0
+xen_bin = rnaTumourMask[["E8"]] > 0
+
+imc_only = imc_bin & !xen_bin
+xen_only = xen_bin & !imc_bin
+overlap  = imc_bin & xen_bin
+
+# Build RGB composite: IMC=red, Xenium=green, overlap=yellow
+r = xen_only | overlap
+g = imc_only | overlap
+b = g
+b@.Data =  matrix(0, nrow = nrow(protTumourMask[["E8"]] ), ncol = ncol(protTumourMask[["E8"]] ))
+
+composite = rgbImage(red = r, green = g, blue = b)
+display(composite, method = "raster")
+legend("topright",
+       legend = c( "RNA tumours","IMC mask", "Overlap"),
+       fill = c("red", "green", "yellow"),
+       xpd = TRUE,
+       cex = 0.7,
+       inset = c(0.194, 0.01),
+       x.intersp = 0.6,
+       y.intersp = 0.7)    
+
+
+# Binarise (label masks -> presence/absence)
+imc_bin = imcTumourMask[["E8"]] > 0
+xen_bin = protTumourMask[["E8"]] > 0
+
+imc_only = imc_bin & !xen_bin
+xen_only = xen_bin & !imc_bin
+overlap  = imc_bin & xen_bin
+
+# Build RGB composite: IMC=red, Xenium=green, overlap=yellow
+r = xen_only | overlap
+g = imc_only | overlap
+b = g
+b@.Data =  matrix(0, nrow = nrow(protTumourMask[["E8"]] ), ncol = ncol(protTumourMask[["E8"]] ))
+
+composite = rgbImage(red = r, green = g, blue = b)
+display(composite, method = "raster")
+legend("topright",
+       legend = c("Protein tumours", "IMC mask", "Overlap"),
+       fill = c("red", "green" , "yellow"),
+       xpd = TRUE,
+       cex = 0.7,
+       inset = c(0.194, 0.01),
+       x.intersp = 0.6,
+       y.intersp = 0.7) 
+```
+
+## Running IVISTA on tumour mask and xenium masks
+
+```{r}
+
+imcTumourSizes = table(imcTumourMask[['E8']][imcTumourMask[["E8"]] > 0])
+
+rnaTumourSizes = table(rnaTumourMask[["E8"]][rnaTumourMask[["E8"]] > 0]) 
+
+protTumourSizes = table(protTumourMask[["E8"]][protTumourMask[["E8"]] > 0]) 
+
+
+hist(imcTumourSizes, breaks = 100)
+summary(c(imcTumourSizes))
+
+hist(rnaTumourSizes, breaks = 100)
+summary(c(rnaTumourSizes))
+
+
+hist(protTumourSizes, breaks = 100)
+summary(c(protTumourSizes))
+
+```
+
+```{r}
+protTumourVista <- iVISTA::classify_iou(
+  ground_truth = imcTumourMask[["E8"]],
+  prediction = protTumourMask[["E8"]],
+  iou_threshold = 0.1,
+  containment_threshold = 0.95,
+  min_intersection = 30,
+  min_fraction = 0,
+  return_details = TRUE
+)
+
+protTumourVista$summary
+protTumourVista$details
+
+```
+
+```{r}
+hist(protTumourVista$details$one_to_one_pairs$iou, breaks = 50, main = paste0("One to one IOU (mean = ", round(mean(protTumourVista$details$one_to_one_pairs$iou), 2), ")"), xlab = "IOU")
+#abline(v = mean(protTumourVista$details$one_to_one_pairs$iou), col = "red")
+
+protTumourVista$details$one_to_one_pairs |> 
+  ggplot(aes(x = iou)) +
+  geom_histogram(bins = 30) +
+  ggtitle("One to one IOU") +
+  labs(x = "IOU") +
+  theme_classic() +
+  geom_vline(xintercept = mean(protTumourVista$details$one_to_one_pairs$iou), col = "red", lty = "dashed")
+
+
+hist(protTumourVista$details$merge_pred_ids$iou, breaks = 50, main = paste0("Merged cells IOU (mean = ", round(mean(protTumourVista$details$merge_pred_ids$iou), 2), ")"), xlab = "IOU")
+hist(protTumourVista$details$split_gt_ids$iou, breaks = 50, main = paste0("Split cells IOU (mean = ", round(mean(protTumourVista$details$split_gt_ids$iou), 2), ")") , xlab = "IOU")
+
+
+```
+
+```{r}
+
+
+rnaTumourVista <- iVISTA::classify_iou(
+  ground_truth = imcTumourMask[["E8"]],
+  prediction = rnaTumourMask[["E8"]],
+  iou_threshold = 0.1,
+  containment_threshold = 0.95,
+  min_intersection = 30,
+  min_fraction = 0,
+  return_details = TRUE
+)
+
+rnaTumourVista$summary
+rnaTumourVista$details
+
+  
+```
+
+```{r}
+hist(rnaTumourVista$details$one_to_one_pairs$iou, breaks = 50, main = paste0("One to one IOU (mean = ", round(mean(rnaTumourVista$details$one_to_one_pairs$iou), 2), ")"), xlab = "IOU")
+#abline(v = mean(protTumourVista$details$one_to_one_pairs$iou), col = "red")
+
+rnaTumourVista$details$one_to_one_pairs |> 
+  ggplot(aes(x = iou)) +
+  geom_histogram(bins = 30) +
+  ggtitle("One to one IOU") +
+  labs(x = "IOU") +
+  theme_classic() +
+  geom_vline(xintercept = mean(rnaTumourVista$details$one_to_one_pairs$iou), col = "red", lty = "dashed")
+
+
+hist(rnaTumourVista$details$merge_pred_ids$iou, breaks = 50, main = paste0("Merged cells IOU (mean = ", round(mean(rnaTumourVista$details$merge_pred_ids$iou), 2), ")"), xlab = "IOU")
+hist(rnaTumourVista$details$split_gt_ids$iou, breaks = 50, main = paste0("Split cells IOU (mean = ", round(mean(rnaTumourVista$details$split_gt_ids$iou), 2), ")") , xlab = "IOU")
+
+
+
+```
+
+## Centroid distance
+
+```{r}
+pixel_size = 0.2125
+
+get_nn = function(mask1, mask2) {
+  feats1 = computeFeatures.moment(mask1)
+  features1 = data.frame(label = seq_len(nrow(feats1)), x = feats1[, "m.cx"], y = feats1[, "m.cy"])
+  
+  feats2 = computeFeatures.moment(mask2)
+  features2 = data.frame(label = seq_len(nrow(feats2)), x = feats2[, "m.cx"], y = feats2[, "m.cy"])
+  
+  # distance matrix: rows = mask1 cells, cols = mask2 cells
+  d = as.matrix(dist(rbind(features1[, c("x","y")], features2[, c("x","y")])))
+  d = d[seq_len(nrow(features1)), nrow(features1) + seq_len(nrow(features2))]
+  
+    
+  nearest_dist = apply(d, 1, min)          # nearest mask2 centroid for each mask1 cell
+  nearest_idx  = apply(d, 1, which.min)    # which mask2 cell it matched to
+  
+  return(nearest_dist)
+
+}
+protTumourIMCDist = get_nn(imcTumourMask[["E8"]], protTumourMask[["E8"]])
+rnaTumourIMCDist = get_nn(imcTumourMask[["E8"]], rnaTumourMask[["E8"]])
+
+protVals = protTumourIMCDist[setdiff(names(protTumourIMCDist), protTumourVista$details$missing_gt_ids$gt_id)]
+
+
+length(protTumourIMCDist)
+length(protVals)
+hist(
+  protVals,
+  breaks = 30,
+  main =
+    paste0(
+      "Distance between IMC and protein tumour centroids \n(mean = ",
+      round(mean(protVals), 2),
+      ")"
+    ),
+  xlab = "Distance"
+)
+
+
+rnaVals = rnaTumourIMCDist[setdiff(names(rnaTumourIMCDist), rnaTumourVista$details$missing_gt_ids$gt_id)]
+hist(rnaVals, breaks = 30, main = 
+    paste0(
+      "Distance between IMC and rna tumour centroids \n(mean = ",
+      round(mean(rnaVals), 2),
+      ")"
+    ), xlab = "Distance")
+
+
+```
+
+Cacluate conversion
+
+```{r}
+
+xeniumScaleFactor = 0.2125
+xeniumDim = dim(E8_raw_image)[1:2]
+xeniumUM = xeniumDim * xeniumScaleFactor
+
+
+imcDim = dim(imcTumourMask[["E8"]])
+
+# 1 imc Pixel is roughly 1um
+xeniumDim/imcDim * xeniumScaleFactor
+```
+
+## Filtering xenium and IMC masks by anti-cy5
+
+```{r}
+
+E8_imc |> 
+  join_features('anti-cy5', assay = "protein_intensities") |> 
+  filter(cellTypeProteinUnified == "tumour") |> 
+  as_tibble() |>
+  ggplot(aes(x = anti.cy5)) +
+  geom_histogram(bins = 100)
+
+
+E8_imc |> 
+  join_features('anti-cy5', assay = "protein_intensities") |> 
+  filter(cellTypeProteinUnified == "tumour") |> 
+  as_tibble() |>
+  pull(anti.cy5) |> 
+  summary()
+
+```
+
+```{r}
+# Filtering xenium mask by anti cy5
+xeniumMaskCy5Filtered = xeniumMask
+
+cellsToKeep = E8_imc |> 
+  join_features('anti-cy5', assay = "protein_intensities") |> 
+  filter(anti.cy5 > 6) |> 
+  pull(imageCellID)
+
+length(cellsToKeep)
+
+xeniumMaskCy5Filtered[["E8"]][!xeniumMaskCy5Filtered[["E8"]] %in% cellsToKeep] =0
+
+
+E8_imc |> 
+  join_features('anti-cy5', assay = "protein_intensities") |> 
+  as_tibble() |>
+  ggplot(aes(x = anti.cy5)) +
+  geom_histogram(bins = 200) +
+  xlim(0, 10)
+
+
+
+# Filtering Anticy5 mask by anticy5
+imcMaskCy5Filtered = imcTumourMask
+  
+imcTumourFeatures = computeFeatures.basic(x = imcTumourMask[["E8"]], ref = E8_cyto[["E8"]][,,which(channelNames(E8_cyto) == "anti-cy5")]) |> 
+  data.frame()
+
+cellsToKeep = imcTumourFeatures |> 
+  filter(b.mean > 6) |> 
+  rownames() 
+
+length(cellsToKeep)
+
+imcMaskCy5Filtered[["E8"]][!imcMaskCy5Filtered[["E8"]] %in% cellsToKeep] = 0
+
+
+imcTumourFeatures |> 
+  ggplot(aes(x = b.mean)) +
+  geom_histogram(bins = 50) +
+  xlim(0, 20) 
+```
+
+```{r}
+cytomapper::plotPixels(
+  image = E8_cyto["E8"],
+  mask = xeniumMaskCy5Filtered,
+  img_id = "imageID",
+  colour_by = c("anti-cy5"),
+  display = "single",
+  legend = NULL,
+  colour = list(
+    `anti-cy5` = c("black", "purple")),
+  bcg = list(
+    `anti-cy5` = c(0, 1, 3)
+),  image_title = list(text = "Filtered xenium mask"))
+
+
+
+cytomapper::plotPixels(
+  image = E8_cyto["E8"],
+  mask = imcMaskCy5Filtered,
+  img_id = "imageID",
+  colour_by = c("anti-cy5"),
+  display = "single",
+  legend = NULL,
+  colour = list(
+    `anti-cy5` = c("black", "purple")),
+  bcg = list(
+    `anti-cy5` = c(0, 1, 3)
+),  image_title = list(text = "Filtered IMC mask"))
+
+```
+
+```{r}
+
+img_color <- channel(xeniumMaskCy5Filtered[["E8"]], "rgb")
+img_color@.Data[] = 0
+img_combined <- paintObjects(xeniumMaskCy5Filtered[["E8"]], tgt = img_color, col = "magenta", opac = c(1, 0), thick = TRUE)
+img_combined <- paintObjects(imcMaskCy5Filtered[["E8"]], tgt =  img_combined, col = "green", opac = c(1, 0), thick = TRUE)
+
+display(img_combined, method = "raster")
+#title(main = "RNA tumours", col.main = "white", line = 3)
+legend("topright",
+       legend = c("Xenium mask", "IMC mask"),
+       fill = c("magenta", "green"),
+       xpd = TRUE,
+       cex = 0.7,
+       inset = c(0.194, 0.01),
+       x.intersp = 0.6,
+       y.intersp = 0.7)    
+
+
+
+
+# Binarise (label masks -> presence/absence)
+imc_bin = imcMaskCy5Filtered[["E8"]] > 0
+xen_bin = xeniumMaskCy5Filtered[["E8"]] > 0
+
+imc_only = imc_bin & !xen_bin
+xen_only = xen_bin & !imc_bin
+overlap  = imc_bin & xen_bin
+
+# Build RGB composite: IMC=red, Xenium=green, overlap=yellow
+r = xen_only | overlap
+g = imc_only | overlap
+b = g
+b@.Data =  matrix(0, nrow = nrow(imcMaskCy5Filtered[["E8"]] ), ncol = ncol(imcMaskCy5Filtered[["E8"]] ))
+
+composite = rgbImage(red = r, green = g, blue = b)
+display(composite, method = "raster")
+legend("topright",
+       legend = c("Xenium Mask", "IMC mask", "Overlap"),
+       fill = c("red", "green" , "yellow"),
+       xpd = TRUE,
+       cex = 0.7,
+       inset = c(0.194, 0.01),
+       x.intersp = 0.6,
+       y.intersp = 0.7) 
+```
+
+### VISTA
+
+```{r}
+
+imcTumourSizes = table(imcMaskCy5Filtered[['E8']][imcMaskCy5Filtered[["E8"]] > 0])
+
+xeniumTumourSizes = table(xeniumMaskCy5Filtered[["E8"]][xeniumMaskCy5Filtered[["E8"]] > 0]) 
+
+
+
+hist(imcTumourSizes, breaks = 100)
+summary(c(imcTumourSizes))
+
+hist(xeniumTumourSizes, breaks = 100)
+summary(c(xeniumTumourSizes))
+
+```
+
+```{r}
+filteredVista <- iVISTA::classify_iou(
+  ground_truth = imcMaskCy5Filtered[["E8"]],
+  prediction = xeniumMaskCy5Filtered[["E8"]],
+  iou_threshold = 0.1,
+  containment_threshold = 0.95,
+  min_intersection = 60,
+  min_fraction = 0,
+  return_details = TRUE
+)
+
+filteredVista$summary
+
+```
+
+```{r}
+hist(filteredVista$details$one_to_one_pairs$iou, breaks = 50, main = paste0("One to one IOU (mean = ", round(mean(filteredVista$details$one_to_one_pairs$iou), 2), ")"), xlab = "IOU")
+#abline(v = mean(protTumourVista$details$one_to_one_pairs$iou), col = "red")
+
+filteredVista$details$one_to_one_pairs |> 
+  ggplot(aes(x = iou)) +
+  geom_histogram(bins = 30) +
+  ggtitle("One to one IOU") +
+  labs(x = "IOU") +
+  theme_classic() +
+  geom_vline(xintercept = mean(filteredVista$details$one_to_one_pairs$iou), col = "red", lty = "dashed")
+
+
+hist(filteredVista$details$merge_pred_ids$iou, breaks = 50, main = paste0("Merged cells IOU (mean = ", round(mean(filteredVista$details$merge_pred_ids$iou), 2), ")"), xlab = "IOU")
+hist(filteredVista$details$split_gt_ids$iou, breaks = 50, main = paste0("Split cells IOU (mean = ", round(mean(filteredVista$details$split_gt_ids$iou), 2), ")") , xlab = "IOU")
+
+
+```
+
+```{r}
+xeniumMatches = xeniumMaskCy5Filtered
+imcMatches = imcMaskCy5Filtered
+
+xeniumMatches[["E8"]][!xeniumMatches[["E8"]] %in% filteredVista$details$one_to_one_pairs$pred_id ] = 0
+
+imcMatches[["E8"]][!imcMatches[["E8"]] %in% filteredVista$details$one_to_one_pairs$gt_id ] = 0
+
+
+img_color <- channel(xeniumMatches[["E8"]], "rgb")
+img_color@.Data[] = 0
+img_combined <- paintObjects(xeniumMatches[["E8"]], tgt = img_color, col = "magenta", opac = c(1, 0), thick = TRUE)
+img_combined <- paintObjects(imcMatches[["E8"]], tgt =  img_combined, col = "green", opac = c(1, 0), thick = TRUE)
+
+display(img_combined, method = "raster")
+#title(main = "RNA tumours", col.main = "white", line = 3)
+legend("topright",
+       legend = c("Xenium mask", "IMC mask"),
+       fill = c("magenta", "green"),
+       xpd = TRUE,
+       cex = 0.7,
+       inset = c(0.194, 0.01),
+       x.intersp = 0.6,
+       y.intersp = 0.7)    
+
+title(main = "One-to-one matches", col.main = "white", line = 3)
+
+```
+
+### NN
+
+```{r}
+xeniumCy5Features = computeFeatures.moment(xeniumMaskCy5Filtered[["E8"]]) |> 
+  data.frame() |> 
+  rename("m.cx" = "x", 
+         "m.cy" = "y") |> 
+  rownames_to_column("cellID") |> 
+  select(cellID, x, y)|> 
+  mutate(cellID = as.numeric(cellID))
+
+
+
+imcCy5Features = computeFeatures.moment(imcMaskCy5Filtered[["E8"]]) |> 
+  data.frame() |> 
+  rename("m.cx" = "x", 
+         "m.cy" = "y") |> 
+  rownames_to_column("cellID") |> 
+  select(cellID, x, y) |> 
+  mutate(cellID = as.numeric(cellID))
+
+
+matchedDf = filteredVista$details$one_to_one_pairs |> 
+  left_join(imcCy5Features, by = c("gt_id" = "cellID"),) |> 
+  rename(c("x" = "x_imc", "y" = "y_imc")) |> 
+  left_join(xeniumCy5Features, by = c("pred_id" = "cellID")) |> 
+  rename(c("x" = "x_xen", "y" = "y_xen")) |> 
+  mutate(dist = sqrt((x_xen - x_imc)^2 + (y_xen - y_imc)^2)) |> 
+  mutate(xen_overlap = intersection/pred_area,
+         imc_overlap = intersection/gt_area)
+
+
+median(matchedDf$dist)
+
+matchedDf |> 
+  ggplot(aes(x = dist)) +
+  geom_histogram(bins = 30, fill = "lightgrey", col = "black")+
+  ggtitle(paste0("Distance from imc to xenium cell (median = ", round(median(matchedDf$dist), 2), "µm)")) +
+  geom_vline(xintercept = median(matchedDf$dist), col = "red", lty = "dashed", size = 1)
+
+
+matchedDf |> 
+  ggplot(aes(x = xen_overlap)) +
+  geom_histogram(bins = 30, fill = "lightgrey", col = "black")+
+  ggtitle(paste0("Xenium IOU (median = ", round(median(matchedDf$xen_overlap), 2), ")")) +
+  geom_vline(xintercept = median(matchedDf$xen_overlap), col = "red", lty = "dashed", size = 1)
+
+matchedDf |> 
+  ggplot(aes(x = imc_overlap)) +
+  geom_histogram(bins = 30, fill = "lightgrey", col = "black")+
+  ggtitle(paste0("IMC IOU (median = ", round(median(matchedDf$imc_overlap), 2), ")")) +
+  geom_vline(xintercept = median(matchedDf$imc_overlap), col = "red", lty = "dashed", size = 1)
+
+
+matchedDf |> 
+  ggplot(aes(x = iou)) +
+  geom_histogram(bins = 30, fill = "lightgrey", col = "black")+
+  ggtitle(paste0("IOU (median = ", round(median(matchedDf$iou), 2), ")")) +
+  geom_vline(xintercept = median(matchedDf$iou), col = "red", lty = "dashed", size = 1)
+
+```
+
+```{r}
+matchedDf |> 
+  ggplot() +
+  geom_point(aes(x = x_imc, y = y_imc, col = "IMC"), alpha = 0.5, shape = 16) +
+  geom_point(aes(x = x_xen, y = y_xen, col = "Xenium"), alpha = 0.5, shape = 1) +
+  theme(aspect.ratio = 1) +
+  scale_y_reverse() +
+  labs(x = "x", y = "y") +
+  scale_colour_manual(name = "Mask centroid", values = c( "IMC" = "red", "Xenium" = "blue"))
+
+```
+
+# 30 landmarks
+
+```{r}
+imageCoords = readxl::read_xlsx("/dskh/nobackup/farhana/proj-radiotherapyIMC/Post Xenium/aligned_imc/E8_raw/imageCoords.xlsx") |> 
+  filter(Slide == "70_4")
+
+xeniumScaleFactor = 0.2125
+
+imc30 = terra::rast("/dskh/nobackup/farhana/proj-radiotherapyIMC/Post Xenium/aligned_imc/E8_raw/landmark/CoreE8_registered_IMC_30_landmarks.tif")
+
+E8_coords = imageCoords |> 
+    dplyr::filter(ImageID == "E8")
+```
+
+## Processing landmark images
+
+```{r}
+
+
+imc30 = imc30[[1:47]] 
+names(imc30) = rownames(imc30)
+
+imcY = ext(imc30)$ymax
+imcX = ext(imc30)$xmax
+
+xmin = E8_coords$xmin / xeniumScaleFactor
+xmax = E8_coords$xmax / xeniumScaleFactor
+
+ymin = E8_coords$ymin / xeniumScaleFactor
+ymax = E8_coords$ymax / xeniumScaleFactor
+
+imc30_extent = terra::ext(xmin, xmax, ymin, ymax)
+imc30_raster = terra::crop(imc30, y = imc30_extent)
+
+imc30_array = as.array(imc30_raster)
+imc30_image = EBImage::Image(imc30_array)
+
+
+# Resizing image to fit mask
+width = dim(xeniumMaskCy5Filtered[['E8']])[1]
+height = dim(xeniumMaskCy5Filtered[['E8']])[2]
+
+imc30_resized = EBImage::resize(imc30_image, w = width, h = height)
+imc30_cyto = CytoImageList(imc30_resized)
+
+channelNames(imc30_cyto) = channelNames(E8_cyto)
+names(imc30_cyto) = "E8"
+mcols(imc30_cyto)$imageID = "E8"
+
+saveRDS(imc30_cyto, "/dskh/nobackup/farhana/proj-radiotherapyIMC/Post Xenium/aligned_imc/E8_raw/landmark/imc30_cyto.rds")
+
+
+```
+
+```{r}
+
+cytomapper::plotPixels(
+  image = imc30_cyto['E8'],
+  mask = xeniumMaskCy5Filtered,
+  img_id = "imageID",
+  colour_by = c("anti-cy5"),
+  display = "all",
+  legend = NULL,
+  colour = list(
+    `anti-cy5` = c("black", "purple")),
+  bcg = list(
+    `anti-cy5` = c(0, 1, 3)),
+  image_title = list(text = ""),
+  save_plot = list(filename = "/dskh/nobackup/farhana/proj-radiotherapyIMC/Post Xenium/aligned_imc/figures/registration_eval/landmark30_anticy5_xeniumMask.png"))
+
+
+cytomapper::plotPixels(
+  image = E8_cyto['E8'], 
+  mask = xeniumMaskCy5Filtered,
+  img_id = "imageID",
+  colour_by = c("anti-cy5"),
+  display = "all",
+  legend = NULL,
+  colour = list(`anti-cy5` = c("black", "purple")),
+  bcg = list(`anti-cy5` = c(0, 1, 3)),
+  image_title = list(text = ""),
+  save_plot = list(filename = "/dskh/nobackup/farhana/proj-radiotherapyIMC/Post Xenium/aligned_imc/figures/registration_eval/original_anticy5_xeniumMask.png"))
+
+
+```
+
+## Segmenting landmark images
+
+```{r}
+
+imc30TumourMask = simpleSeg::simpleSeg(
+  image = imc30_cyto,
+  nucleus = c("anti-cy5"),
+  cores = 10,
+  transform = c("asinh"),
+  watershed = "intensity",
+  sizeSelection = 50,
+  smooth = 0.8
+)
+
+names(imc30TumourMask) = c("E8")
+
+saveRDS(imc30TumourMask, "/dskh/nobackup/farhana/proj-radiotherapyIMC/Post Xenium/aligned_imc/E8_raw/landmark/imc30_tumourMask.rds")
+```
+
+```{r}
+
+imc30_cyto = readRDS("/dskh/nobackup/farhana/proj-radiotherapyIMC/Post Xenium/aligned_imc/E8_raw/landmark/imc30_cyto.rds")
+imc30TumourMask = readRDS("/dskh/nobackup/farhana/proj-radiotherapyIMC/Post Xenium/aligned_imc/E8_raw/landmark/imc30_tumourMask.rds")
+```
+
+
+
+```{r}
+
+# FIltering landmark 30
+imc30MaskCy5Filtered = imc30TumourMask
+  
+imc30TumourFeatures = computeFeatures.basic(
+  x = imc30TumourMask[["E8"]],
+  ref = imc30_cyto[["E8"]][,,which(channelNames(imc30_cyto) == "anti-cy5")]) |> 
+  data.frame()
+
+cellsToKeep = imc30TumourFeatures |> 
+  filter(b.mean > 6) |> 
+  rownames() 
+
+length(cellsToKeep)
+
+imc30MaskCy5Filtered[["E8"]][!imc30MaskCy5Filtered[["E8"]] %in% cellsToKeep] = 0
+
+imc30TumourFeatures |> 
+  ggplot(aes(x = b.mean)) +
+  geom_histogram(bins = 50, col = "black", fill = "lightgrey") +
+  xlim(0, 50) 
+```
+
+```{r}
+
+cytomapper::plotPixels(
+  image = imc30_cyto['E8'],
+  mask = imc30MaskCy5Filtered,
+  img_id = "imageID",
+  colour_by = c("anti-cy5"),
+  display = "single",
+  legend = NULL,
+  colour = list(
+    `anti-cy5` = c("black", "purple")),
+  bcg = list(
+    `anti-cy5` = c(0, 1, 3)
+),  image_title = list(text = "Landmark 30 filtered mask"))
+
+
+cytomapper::plotPixels(
+  image = E8_cyto['E8'],
+  mask = imcMaskCy5Filtered,
+  img_id = "imageID",
+  colour_by = c("anti-cy5"),
+  display = "single",
+  legend = NULL,
+  colour = list(
+    `anti-cy5` = c("black", "purple")),
+  bcg = list(
+    `anti-cy5` = c(0, 1, 3)
+),  image_title = list(text = "Original filtered mask"))
+
+```
+
+## Comparing to xenium mask
+
+```{r}
+
+img_color <- channel(xeniumMaskCy5Filtered[["E8"]], "rgb")
+img_color@.Data[] = 0
+img_combined <- paintObjects(xeniumMaskCy5Filtered[["E8"]], tgt = img_color, col = "magenta", opac = c(1, 0), thick = TRUE)
+img_combined <- paintObjects(imc30MaskCy5Filtered[["E8"]], tgt =  img_combined, col = "green", opac = c(1, 0), thick = TRUE)
+
+display(img_combined, method = "raster")
+title(main = "Landmark 30 mask", col.main = "white", line = 3)
+legend("topright",
+       legend = c("Xenium mask", "IMC mask"),
+       fill = c("magenta", "green"),
+       xpd = TRUE,
+       cex = 0.7,
+       inset = c(0.194, 0.01),
+       x.intersp = 0.6,
+       y.intersp = 0.7) 
+
+
+
+
+img_color <- channel(xeniumMaskCy5Filtered[["E8"]], "rgb")
+img_color@.Data[] = 0
+img_combined <- paintObjects(xeniumMaskCy5Filtered[["E8"]], tgt = img_color, col = "magenta", opac = c(1, 0), thick = TRUE)
+img_combined <- paintObjects(imcMaskCy5Filtered[["E8"]], tgt =  img_combined, col = "green", opac = c(1, 0), thick = TRUE)
+
+display(img_combined, method = "raster")
+title(main = "Original IMC mask", col.main = "white", line = 3)
+legend("topright",
+       legend = c("Xenium mask", "IMC mask"),
+       fill = c("magenta", "green"),
+       xpd = TRUE,
+       cex = 0.7,
+       inset = c(0.194, 0.01),
+       x.intersp = 0.6,
+       y.intersp = 0.7) 
+```
+
+## Centroid distances
+
+```{r}
+originalVISTA <- iVISTA::classify_iou(
+  ground_truth = imcMaskCy5Filtered[["E8"]],
+  prediction = xeniumMaskCy5Filtered[["E8"]],
+  iou_threshold = 0.1,
+  containment_threshold = 0.95,
+  min_intersection = 60,
+  min_fraction = 0,
+  return_details = TRUE
+)
+
+imc30VISTA <- iVISTA::classify_iou(
+  ground_truth = imc30MaskCy5Filtered[["E8"]],
+  prediction = xeniumMaskCy5Filtered[["E8"]],
+  iou_threshold = 0.1,
+  containment_threshold = 0.95,
+  min_intersection = 60,
+  min_fraction = 0,
+  return_details = TRUE
+)
+
+print('imc30')
+print(imc30VISTA$summary)
+
+print('original')
+print(originalVISTA$summary)
+```
+
+
+```{r}
+pixel_size = 0.2125
+
+
+get_nn = function(imc_mask, xenium_mask) {
+  imcFeatures = computeFeatures.moment(imc_mask) |> 
+    data.frame() |> 
+    rename("m.cx" = "x", 
+           "m.cy" = "y") |> 
+    rownames_to_column("imcCellID") |> 
+    select(imcCellID, x, y)|> 
+    mutate(imcCellID = as.numeric(imcCellID))
+  
+  xeniumFeatures = computeFeatures.moment(xenium_mask) |> 
+    data.frame() |> 
+    rename("m.cx" = "x", 
+           "m.cy" = "y") |> 
+    rownames_to_column("xeniumCellID") |> 
+    select(xeniumCellID, x, y)|> 
+    mutate(xeniumCellID = as.numeric(xeniumCellID))
+  
+  distances = spatstat.geom::crossdist(
+    imcFeatures$x, imcFeatures$y,
+    xeniumFeatures$x, xeniumFeatures$y)
+  
+  rownames(distances) = imcFeatures$imcCellID
+  colnames(distances) = xeniumFeatures$xeniumCellID
+  
+  
+  nearest_dist = apply(distances, 1, min)
+  nearest_idx  = apply(distances, 1, which.min)
+  
+  nn_df = data.frame(
+    imcCellID = as.integer(names(nearest_idx)),
+    xeniumCellID = xeniumFeatures$xeniumCellID[nearest_idx],
+    distance = nearest_dist) |> 
+    left_join(imcFeatures, by = "imcCellID") |> 
+    dplyr::rename("x_imc" = "x", "y_imc" = "y") |> 
+    left_join(xeniumFeatures, by = "xeniumCellID") |> 
+    dplyr::rename("x_xen" = "x", "y_xen" = "y") 
+  
+  return(nn_df)
+
+}
+```
+
+```{r}
+
+imc30_nn = get_nn(imc30MaskCy5Filtered[["E8"]], xeniumMaskCy5Filtered[["E8"]])|>  
+  filter(!imcCellID %in% imc30VISTA$details$missing_gt_ids$gt_id) |>  
+  filter(xeniumCellID %in%originalVISTA$details$one_to_one_pairs$pred_id)
+
+original_nn = get_nn(imcMaskCy5Filtered[["E8"]], xeniumMaskCy5Filtered[["E8"]]) |> 
+  filter(!imcCellID %in% originalVISTA$details$missing_gt_ids$gt_id)|> 
+  filter(xeniumCellID %in%originalVISTA$details$one_to_one_pairs$pred_id)
+```
+
+```{r}
+medianVal = round(median(imc30_nn$distance), 2)
+imc30_nn |> 
+  ggplot(aes(x = distance)) +
+  geom_histogram(bins = 30, fill = "lightgrey", col = "black")+
+  ggtitle(paste0("Distance from imc (30 landmark) to xenium cell (median = ",
+                 medianVal, "µm)")) +
+  geom_vline(xintercept = medianVal, col = "red", lty = "dashed", size = 1)
+
+
+medianVal = round(median(original_nn$distance), 2)
+original_nn |> 
+  ggplot(aes(x = distance)) +
+  geom_histogram(bins = 30, fill = "lightgrey", col = "black")+
+  ggtitle(paste0("Distance from imc (original) to xenium cell (median = ",
+                 medianVal, "µm)")) +
+  labs(x = "Distance") +
+  geom_vline(xintercept = medianVal, col = "red", lty = "dashed", size = 1)
+```
+
+```{r}
+
+originalMedian = round(median(original_nn$distance), 2)
+imc30Median = round(median(imc30_nn$distance), 2)
+
+
+ggplot() +
+  geom_density(aes(x = original_nn$distance, col = "Original"), key_glyph = "path")+
+  geom_density(aes(x = imc30_nn$distance, col = "30 landmarks"), key_glyph = "path") +
+  labs(x = "Distance", y = "Density") +
+  geom_vline(xintercept = originalMedian, col = "black", lty = "dashed", size = 0.5) +
+  geom_vline(xintercept = imc30Median, col = "red", lty = "dashed", size = 0.5) +
+  scale_colour_manual(name = "Mask",
+                      values = c( "Original" = "black", "30 landmarks" = "red")) 
+
+
+
+ggsave("/dskh/nobackup/farhana/proj-radiotherapyIMC/Post Xenium/aligned_imc/figures/registration_eval/originalv30DensityMedian.pdf")
+
+
+ggplot() +
+  geom_density(aes(x = original_nn$distance, col = "Original"), key_glyph = "path")+
+  geom_density(aes(x = imc30_nn$distance, col = "30 landmarks"), key_glyph = "path") +
+  labs(x = "Distance", y = "Density") +
+  scale_colour_manual(name = "Mask",
+                      values = c( "Original" = "black", "30 landmarks" = "red"))
+
+
+ggsave("/dskh/nobackup/farhana/proj-radiotherapyIMC/Post Xenium/aligned_imc/figures/registration_eval/originalv30Density.pdf")
+```
+
+```{r}
+
+medianVal = round(median(imc30_nn$distance), 2)
+imc30_nn |> 
+  ggplot(aes(x = distance)) +
+  geom_histogram(bins = 30, fill = "lightgrey", col = "black")+
+  ggtitle(paste0("Median = ", medianVal, "µm")) +
+  labs(x = "Distance", y = "Counts") +
+  geom_vline(xintercept = medianVal, col = "red", lty = "dashed", size = 1)
+
+ggsave("/dskh/nobackup/farhana/proj-radiotherapyIMC/Post Xenium/aligned_imc/figures/registration_eval/imc30_nn_hist.pdf")
+
+medianVal = round(median(original_nn$distance), 2)
+original_nn |> 
+  ggplot(aes(x = distance)) +
+  geom_histogram(bins = 30, fill = "lightgrey", col = "black")+
+  ggtitle(paste0("Median = ",medianVal, "µm")) +
+  labs(x = "Distance", y = "Counts") +
+  geom_vline(xintercept = medianVal, col = "red", lty = "dashed", size = 1)
+
+
+ggsave("/dskh/nobackup/farhana/proj-radiotherapyIMC/Post Xenium/aligned_imc/figures/registration_eval/original_nn_hist.pdf")
+```
+
+```{r}
+
+original_nn |> 
+  ggplot() +
+  geom_point(aes(x = x_imc, y = y_imc, col = "IMC"), alpha = 0.5, shape = 16) +
+  geom_point(aes(x = x_xen, y = y_xen, col = "Xenium"), alpha = 0.5, shape = 1) +
+  theme(aspect.ratio = 1) +
+  scale_y_reverse() +
+  labs(x = "x", y = "y") +
+  ggtitle("Original") +
+  scale_colour_manual(name = "Mask centroid", values = c( "IMC" = "red", "Xenium" = "blue"))
+
+ggsave("/dskh/nobackup/farhana/proj-radiotherapyIMC/Post Xenium/aligned_imc/figures/registration_eval/orginalScatter.pdf")
+
+imc30_nn |> 
+  ggplot() +
+  geom_point(aes(x = x_imc, y = y_imc, col = "IMC"), alpha = 0.5, shape = 16) +
+  geom_point(aes(x = x_xen, y = y_xen, col = "Xenium"), alpha = 0.5, shape = 1) +
+  theme(aspect.ratio = 1) +
+  scale_y_reverse() +
+  labs(x = "x", y = "y") +
+  ggtitle("30 landmarks") +
+  scale_colour_manual(name = "Mask centroid", values = c( "IMC" = "red", "Xenium" = "blue"))
+
+ggsave("/dskh/nobackup/farhana/proj-radiotherapyIMC/Post Xenium/aligned_imc/figures/registration_eval/30nnScatter.pdf")
+```
+
+```{r}
+original_nn |> 
+  mutate(x_disp = x_imc - x_xen,
+         y_disp = y_imc - y_xen) |> 
+  ggplot(aes(x = x_disp)) +
+  geom_histogram(fill = "lightgrey", col = "black") +
+  labs(x = "x axis displacement")
+
+ggsave("/dskh/nobackup/farhana/proj-radiotherapyIMC/Post Xenium/aligned_imc/figures/registration_eval/x_displacement.pdf")
+
+original_nn |> 
+  mutate(x_disp = x_imc - x_xen,
+         y_disp = y_imc - y_xen) |> 
+  ggplot(aes(x = y_disp)) +
+  geom_histogram(fill = "lightgrey", col = "black") +
+  labs(x = "y axis displacement")
+
+ggsave("/dskh/nobackup/farhana/proj-radiotherapyIMC/Post Xenium/aligned_imc/figures/registration_eval/y_displacement.pdf")
+```
+
+```{r}
+
+imc30Size = table(imc30MaskCy5Filtered[["E8"]][imc30MaskCy5Filtered[["E8"]] > 0]) 
+
+originalSize = table(imcMaskCy5Filtered[["E8"]][imcMaskCy5Filtered[["E8"]] > 0]) 
+
+hist(imc30Size, breaks = 100)
+summary(c(imc30Size))
+
+
+hist(originalSize, breaks = 100)
+summary(c(originalSize))
+
+
+xeniumSize = table(xeniumMask[["E8"]][xeniumMask[["E8"]] > 0]) 
+summary(c(xeniumSize))
+```
+

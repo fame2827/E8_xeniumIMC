@@ -1,0 +1,1313 @@
+---
+title: "postXenium_analysis"
+format: html
+---
+
+
+
+# Setup
+
+```{r}
+library(tidyverse)
+library(tidySingleCellExperiment)
+library(MoleculeExperiment)
+library(cytomapper)
+library(SpatialExperiment)
+
+library(sf)
+library(raster)
+library(terra)
+library(cytomapper)
+library(lisaClust)
+
+library(edgeR)
+library(limma)
+library(gghighlight)
+library(Statial)
+library(lisaClust)
+```
+
+```{r}
+E8_imc = readRDS("data/E8_imc.rds")
+E8_xenium = readRDS("data/E8_xenium.rds")
+
+
+zeroCells = colnames(E8_imc)[!colnames(E8_imc) %in%  colnames(E8_xenium)]
+
+E8_imc |> 
+  filter(.cell %in% zeroCells) |> 
+  ggplot(aes(x = x, y =y, col = cellTypeProtein)) +
+  geom_point() +
+  theme_classic()
+
+
+E8_imc |> 
+ mutate(isZero = ifelse(.cell %in% zeroCells, "yes", "no")) |> 
+  arrange(isZero) |> 
+  ggplot(aes(x = x, y =y, col = isZero)) +
+  geom_point() +
+  theme_classic()
+
+E8_imc = E8_imc |> 
+  filter(!.cell %in% zeroCells)
+
+
+all(colnames(E8_imc) == colnames(E8_xenium))
+
+E8_xenium$cellTypeProtein = E8_imc$cellTypeProtein
+E8_imc$cellTypeTranscript = E8_xenium$cellTypeTranscript
+```
+
+
+
+```{r}
+
+
+clusterMarkers = c(
+  "CD11c",
+  # "CD16", # Myeloid marker
+  "CD68",
+  #"panCK", # Epithelial cells, not really expected in E8
+  "CD20",
+  "CD8a",
+  "podoplanin",
+  "CD14",
+  "FX111A",
+  # "FoxP3", # CD4 transcript marker, not very highly expressed
+  "CD45",
+  "CD66a",
+  "CD3",
+  "anti-cy5", #SOX10 tumour marker
+  "HLADR",
+  "CD4",
+  # "CD56",
+  "CD31"
+)
+
+
+scater::plotGroupedHeatmap(
+  E8_imc,
+  features = clusterMarkers,
+  group = "cellTypeProtein",
+  exprs_values = "norm",
+  center = TRUE,
+  scale = TRUE,
+  zlim = c(-3, 3),
+  cluster_rows = FALSE,
+  block = "cellTypeProtein"
+) 
+
+```
+
+# Boxplots comparing genes
+
+```{r fig.height= 10}
+
+useMarkers = rownames(E8_imc)[!(rownames(E8_imc) %in% c("80ArAr", "104Pd", "HH3", "189Os", "190Os", "DNA1", "DNA2", "208Pb"))]
+
+E8_imc_long = E8_imc |> 
+  join_features(useMarkers, shape = "long")
+
+
+E8_imc_long |> 
+  ggplot(aes(x = cellTypeProtein, y = .abundance_norm)) +
+  geom_boxplot() +
+  theme_classic() + 
+  facet_wrap(~.feature)+ 
+  coord_flip()
+```
+DE genes for the protein cell types
+
+
+```{r fig.height= 10}
+
+E8_cellProtein_DEG = findMarkers(E8_xenium, groups=E8_xenium$cellTypeProtein, direction="up", assay.type = "logcounts")
+# select for a few markers per cluster
+top <- lapply(E8_cellProtein_DEG, \(df) rownames(df)[df$Top <= 3])
+top
+```
+
+
+# Correlation
+
+```{r}
+
+
+ggplot(E8_imc, aes(x = assay(E8_imc, "norm")["CD3", ], y =  assay(E8_xenium, "logcounts")["CD3E", ])) +
+  geom_point() +
+  theme_classic() +
+  labs( x= "CD3 (protein)", y = "CD3D (transcript)") 
+
+
+
+ggplot(E8_imc, aes(x = assay(E8_imc, "norm")["CD20", ], y =  assay(E8_xenium, "logcounts")["MS4A1", ])) +
+  geom_point() +
+  theme_classic() +
+  labs( x= "CD20 (protein)", y = "MS41A (transcript)") 
+```
+
+```{r}
+plot(assay(E8_imc, "norm")["CD20", ], assay(E8_xenium, "logcounts")["MS4A1", ] )
+cor(assay(E8_imc, "norm")["CD20", ], pmin(assay(E8_xenium, "logcounts")["MS4A1", ], 10))
+cor(assay(E8_imc, "norm")["CD3", ], assay(E8_xenium, "logcounts")["CD3E", ])
+
+
+
+ggplot(E8_imc, aes(x = assay(E8_imc, "norm")["CD3", ], y =  assay(E8_xenium, "logcounts")["CD3E", ])) +
+  geom_point() +
+  theme_classic() +
+  labs( x= "CD3 (protein)", y = "CD3D (transcript)") 
+
+
+
+ggplot(E8_imc, aes(x = assay(E8_imc, "norm")["CD20", ], y =  assay(E8_xenium, "logcounts")["MS4A1", ])) +
+  geom_point() +
+  theme_classic() +
+  labs( x= "CD20 (protein)", y = "MS41A (transcript)") 
+
+
+ggplot(E8_imc, aes(x = assay(E8_imc, "norm")["CD20", ], y =  assay(E8_xenium, "transcript_counts")["MS4A1", ])) +
+  geom_point() +
+  theme_classic() +
+  labs( x= "CD20 (protein)", y = "MS41A (transcript)") 
+
+
+
+ggplot(E8_imc, aes(x = cut(assay(E8_imc, "norm")["CD20", ], breaks = 0:10/10), y =  assay(E8_xenium, "transcript_counts")["MS4A1", ])) +
+  geom_boxplot() +
+  theme_classic() +
+  labs( x= "CD20 (protein)", y = "MS41A (transcript)") 
+
+ggplot(E8_imc, aes(x = cut(assay(E8_imc, "norm")["CD20", ], breaks = 0:10/10), y =  assay(E8_xenium, "logcounts")["MS4A1", ])) +
+  geom_boxplot() +
+  theme_classic() +
+  labs( x= "CD20 (protein)", y = "MS41A (transcript)") 
+
+
+ggplot(E8_imc, aes(x = assay(E8_imc, "norm")["CD20", ], y =  as.factor(pmin(assay(E8_xenium, "transcript_counts")["MS4A1", ], 10)))) +
+  geom_boxplot() +
+  theme_classic() +
+  labs( x= "CD20 (protein)", y = "MS41A (transcript)") +
+  coord_flip()
+
+
+ggplot(E8_imc, aes(x = assay(E8_imc, "norm")["CD3", ], y =  as.factor(pmin(assay(E8_xenium, "transcript_counts")["CD3E", ], 10)))) +
+  geom_boxplot() +
+  theme_classic() +
+  coord_flip()
+
+cor(assay(E8_imc, "norm")["CD20", ], assay(E8_xenium, "transcript_counts")["MS4A1", ])
+
+cor(assay(E8_imc, "norm")["CD20", ], pmin(assay(E8_xenium, "transcript_counts")["MS4A1", ], 8))
+```
+
+
+
+```{r}
+ggplot(E8_imc, aes(x = assay(E8_imc, "norm")["CD20", ], y =  as.factor(pmin(assay(E8_xenium, "transcript_counts")["MS4A1", ], 10)))) +
+  geom_boxplot() +
+  theme_classic() +
+  labs( x= "CD20 (protein)", y = "MS41A (transcript)") +
+  coord_flip()
+
+
+ggplot(E8_imc, aes(x = assay(E8_imc, "norm")["CD3", ], y =  as.factor(pmin(assay(E8_xenium, "transcript_counts")["CD3E", ], 5)))) +
+  geom_boxplot() +
+  theme_classic() +
+  coord_flip()+ 
+  labs( x= "CD3 (protein)", y = "CD3E (transcript)")
+```
+
+
+```{r}
+apply(assay(E8_xenium, "logcounts"), 1, cor, assay(E8_imc, "norm")["CD3", ], method = "spearman") |> sort()
+```
+
+```{r}
+asinh(assay(E8_imc, "protein_intensities")["DNA1",]) |> hist(breaks = 100)
+
+# look at correlation of cd3 and cd20 of cells above 4.5 ish
+
+ggplot(E8_imc[, ], aes(x = assay(E8_imc, "norm")["CD3", ],
+                                y =  as.factor(pmin(assay(E8_xenium, "transcript_counts")["CD3E", ], 5)))) +
+  geom_boxplot() +
+  theme_classic() +
+  coord_flip() +
+  ggtitle("original")
+
+DNAposIdx = which(asinh(assay(E8_imc, "protein_intensities")["DNA1",]) > 4.5)
+protein = assay(E8_imc, "norm")["CD3", DNAposIdx]
+transcript = assay(E8_xenium, "transcript_counts")["CD3E", DNAposIdx]
+correlation = cor(protein, transcript)
+
+ggplot(E8_imc[, DNAposIdx], aes(x = protein, y =  as.factor(pmin(transcript, 5)))) +
+  geom_boxplot() +
+  theme_classic() +
+  coord_flip() +
+  ggtitle(paste("cutoff = 4.5,", "correlation =", round(correlation, 2)))
+
+E8_imc[, DNAposIdx] |> 
+  ggplot(aes(x = x, y =y, col = cellTypeProtein)) +geom_point()
+
+
+DNAposIdx = which(asinh(assay(E8_imc, "protein_intensities")["DNA1",]) > 3)
+protein = assay(E8_imc, "norm")["CD3", DNAposIdx]
+transcript = assay(E8_xenium, "transcript_counts")["CD3E", DNAposIdx]
+correlation = cor(protein, transcript)
+
+ggplot(E8_imc[, DNAposIdx], aes(x = protein, y =  as.factor(pmin(transcript, 5)))) +
+  geom_boxplot() +
+  theme_classic() +
+  coord_flip() +
+  ggtitle(paste("cutoff = 3,", "correlation =", round(correlation, 2)))
+E8_imc[, DNAposIdx] |> 
+  ggplot(aes(x = x, y =y, col = cellTypeProtein)) +geom_point(size = 0.1)
+
+
+DNAposIdx = which(asinh(assay(E8_imc, "protein_intensities")["DNA1",]) > 5)
+protein = assay(E8_imc, "norm")["CD3", DNAposIdx]
+transcript = assay(E8_xenium, "transcript_counts")["CD3E", DNAposIdx]
+correlation = cor(protein, transcript)
+
+ggplot(E8_imc[, DNAposIdx], aes(x = protein, y =  as.factor(pmin(transcript, 5)))) +
+  geom_boxplot() +
+  theme_classic() +
+  coord_flip() +
+  ggtitle(paste("cutoff = 5,", "correlation =", round(correlation, 2)))
+
+E8_imc[, DNAposIdx] |> 
+  ggplot(aes(x = x, y =y, col = cellTypeProtein)) +geom_point()
+
+
+```
+
+Final figure:
+```{r}
+
+imc <- join_features(E8_imc, features = "CD3", shape = "wide") |> colData() |> as.data.frame() 
+xenium <- join_features(E8_xenium, features = "CD3E", shape = "wide", assay = "transcript_counts") |> colData() |> as.data.frame()
+
+combine <- full_join(imc,xenium)
+
+combine$CD3E <- factor(pmin(combine$CD3E,3), levels = c(0,1,2,3), labels = c(0,1,2,"3+"))
+
+c1 <- cor(combine$CD3, as.numeric(combine$CD3E), use = "complete")
+
+
+```
+
+```{r}
+
+pCD3 <- combine |>
+  na.omit() |>
+ggplot(aes(CD3E, CD3)) +
+geom_violin(quantile.linetype = 1, quantile.linewidth = c(0.25,1.25,0.25), width = 0.8) +
+  theme_classic() +
+  labs(title = paste0("CD3 vs CD3E (r = ", round(c1,2), ")")) +
+  theme(plot.title = element_text(hjust = 0.5))
+
+```
+
+```{r}
+
+imc <- join_features(E8_imc, features = "CD20", shape = "wide") |> colData() |> as.data.frame() 
+xenium <- join_features(E8_xenium, features = "MS4A1", shape = "wide", assay = "transcript_counts") |> colData() |> as.data.frame()
+
+combine <- full_join(imc,xenium)
+
+combine$MS4A1 <- factor(pmin(combine$MS4A1,3), levels = c(0,1,2,3), labels = c(0,1,2,"3+"))
+
+c2 <- cor(combine$CD20, as.numeric(combine$MS4A1), use = "complete")
+
+```
+
+```{r}
+pCD20 <- combine |>
+  na.omit() |>
+ggplot(aes(MS4A1, CD20)) +
+  geom_violin(quantile.linetype = 1, quantile.linewidth = c(0.25,1.25,0.25), width = 1.5) +
+  theme_classic()  +
+  labs(title = paste0("CD20 vs MS4A1 (r = ", round(c2,2), ")")) +
+  theme(plot.title = element_text(hjust = 0.5))
+
+pCD20
+```
+
+```{r}
+
+pCD3 + pCD20
+```
+
+
+# Mask Visualisation
+
+## FINAL - Using Thresholds
+```{r fig.height = 10}
+E8Mask_cyto = readRDS("E8_raw/E8Mask_cyto.rds")
+
+# Using cellTypeProtein B cells as CD20 positive
+E8_bcell_vis = E8_imc |>
+  join_features(c("CD3", "CD20"), shape = "wide", assay = "norm") |> 
+  mutate(CD20_pos = ifelse(CD3 < 0.4 & CD20 > 0.065, 1, 0),
+         CD3_pos = ifelse(CD3 > 0.4 & CD20 < 0.065, 1, 0),
+         MS4A1_pos = ifelse(.cell %in% names(which(assay(E8_xenium, "transcript_counts")["MS4A1",] > 0 &
+                                                   assay(E8_xenium, "transcript_counts")["CD3E",] == 0)), 1, 0),
+         CD3t_pos = ifelse(.cell %in% names(which(assay(E8_xenium, "transcript_counts")["CD3E",] > 0 &
+                                                  assay(E8_xenium, "transcript_counts")["MS4A1",] == 0)) , 1, 0)) |> 
+  mutate(bcell_pos = case_when(
+    MS4A1_pos == 1 & CD20_pos == 0 ~ "transcript",
+    MS4A1_pos == 0 & CD20_pos == 1 ~ "protein",
+    MS4A1_pos == 1 & CD20_pos == 1 ~ "both",
+    TRUE ~ "none"
+  )) |> 
+  mutate(cd3pos = case_when(
+    CD3t_pos == 1 & CD3_pos == 0 ~ "transcript",
+    CD3t_pos == 0 & CD3_pos == 1 ~ "protein",
+    CD3t_pos == 1 & CD3_pos == 1 ~ "both",
+    TRUE ~ "none"
+  ))
+  
+which(assay(E8_xenium, "transcript_counts")["CD3E",] > 0 & assay(E8_xenium, "transcript_counts")["MS4A1",] > 0) |> 
+  length()
+plotCells(mask = E8Mask_cyto,
+          object = E8_bcell_vis,
+          img_id = "imageID",
+          cell_id = "imageCellID",
+          exprs_values = "norm",
+          colour_by = "bcell_pos")
+
+
+plotCells(mask = E8Mask_cyto,
+          object = E8_bcell_vis,
+          img_id = "imageID",
+          cell_id = "imageCellID",
+          exprs_values = "norm",
+          colour_by = "cd3pos")
+
+```
+
+
+```{r}
+bcellIDX = which(E8_bcell_vis$CD20_pos == 1)
+  
+  
+ggplot(E8_bcell_vis[, bcellIDX],
+       aes(x = assay(E8_imc, "norm")["CD20" , bcellIDX], 
+           y =  assay(E8_xenium, "transcript_counts")["MS4A1" , bcellIDX])) +
+  geom_point() +
+  theme_classic() +
+  labs(y = "transcript", x =  "protein")
+
+
+ggplot(E8_bcell_vis[, bcellIDX],
+       aes(x =  as.factor(pmin(assay(E8_xenium, "transcript_counts")["MS4A1" , bcellIDX], 10)),
+           y = assay(E8_imc, "norm")["CD20" , bcellIDX])) +
+  geom_boxplot() +
+  theme_classic() +
+  labs(x = "transcript", y =  "protein")
+```
+
+
+
+### heatmap
+
+```{r}
+
+all(colnames(E8_xenium) == colnames(E8_imc))
+
+E8_xenium_bcell_vis = E8_xenium
+E8_xenium_bcell_vis$bcell_pos = E8_bcell_vis$bcell_pos
+E8_xenium_bcell_vis$cd3pos = E8_bcell_vis$cd3pos
+
+
+plot = scater::plotGroupedHeatmap(
+  E8_xenium_bcell_vis,
+  features = rownames(E8_xenium_bcell_vis),
+  group = "bcell_pos",
+  exprs_values = "logcounts",
+  center = TRUE,
+  scale = TRUE,
+  zlim = c(-3, 3),
+  cluster_rows = TRUE,
+  block = "bcell_pos",
+  fontsize_row  = 8
+) 
+
+
+ggsave("negativeGatingCD20_gene_heatmap.pdf",plot,  height = 40, width = 5)
+
+plot = scater::plotGroupedHeatmap(
+  E8_xenium_bcell_vis,
+  features = rownames(E8_xenium_bcell_vis),
+  group = "cd3pos",
+  exprs_values = "logcounts",
+  center = TRUE,
+  scale = TRUE,
+  zlim = c(-3, 3),
+  cluster_rows = TRUE,
+  block = "cd3pos",
+  fontsize_row  = 8
+) 
+
+
+ggsave("negativeGatingCD3_gene_heatmap.pdf",plot,  height = 40, width = 5)
+```
+
+
+
+
+## Using imc cellType annotations
+
+```{r}
+all(colnames(E8_imc) == colnames(E8_xenium) )
+```
+
+
+
+```{r}
+
+# Using cellTypeProtein B cells as CD20 positive
+E8_bcell_vis = E8_imc |>
+  join_features(c("CD3", "CD20"), shape = "wide", assay = "norm") |> 
+  mutate(MS4A1_pos = ifelse(.cell %in% names(which(assay(E8_xenium, "transcript_counts")["MS4A1",] >2)), 1, 0),
+         CD3t_pos = ifelse(.cell %in% names(which(assay(E8_xenium, "transcript_counts")["CD3E",] > 3)) , 1, 0)) |> 
+  mutate(bcell_pos = case_when(
+    MS4A1_pos == 1 & cellTypeProtein != "b" ~ "transcript",
+    MS4A1_pos == 0 & cellTypeProtein == "b" ~ "protein",
+    MS4A1_pos == 1 & cellTypeProtein == "b" ~ "both",
+    TRUE ~ "none"
+  )) |> 
+  mutate(cd3pos = case_when(
+    CD3t_pos == 1 &  !cellTypeProtein %in% c("cd8t", "cd4t") ~ "transcript",
+    CD3t_pos == 0 &  cellTypeProtein %in% c("cd8t", "cd4t") ~ "protein",
+    CD3t_pos == 1 &  cellTypeProtein %in% c("cd8t", "cd4t") ~ "both",
+    TRUE ~ "none"
+  ))
+
+
+plotCells(mask = E8Mask_cyto,
+          object = E8_bcell_vis,
+          img_id = "imageID",
+          cell_id = "imageCellID",
+          exprs_values = "norm",
+          colour_by = "bcell_pos")
+
+
+plotCells(mask = E8Mask_cyto,
+          object = E8_bcell_vis,
+          img_id = "imageID",
+          cell_id = "imageCellID",
+          exprs_values = "norm",
+          colour_by = "cd3pos")
+
+
+E8_bcell_vis$CD3t_pos |> table()
+
+
+E8_bcell_vis |> 
+  filter(CD3t_pos == 1) |> 
+  ggplot(aes(x = x, y=y, col = cellTypeProtein)) +
+  geom_point()
+
+E8_bcell_vis |> 
+  filter(cellTypeProtein %in% c("cd4t", "cd8t"))
+```
+
+
+## FINAL - Using both cellType annotations
+
+```{r}
+
+
+E8_bcell_vis = E8_imc |> 
+    mutate(bcell_pos = case_when(
+    cellTypeTranscript == "b" & cellTypeProtein != "b" ~ "transcript",
+    cellTypeTranscript != "b" & cellTypeProtein == "b" ~ "protein",
+    cellTypeTranscript == "b" & cellTypeProtein == "b" ~ "both",
+    TRUE ~ "none"
+  )) |> 
+  mutate(cd3pos = case_when(
+    cellTypeTranscript %in% c("tcell", "cd4t", "cd8t") &  !cellTypeProtein %in% c("cd8t", "cd4t") ~ "transcript",
+    !cellTypeTranscript %in% c("tcell", "cd4t", "cd8t") &  cellTypeProtein %in% c("cd8t", "cd4t") ~ "protein",
+    cellTypeTranscript %in% c("tcell", "cd4t", "cd8t") &  cellTypeProtein %in% c("cd8t", "cd4t") ~ "both",
+    TRUE ~ "none"
+  ))
+  
+
+
+plotCells(mask = E8Mask_cyto,
+          object = E8_bcell_vis,
+          img_id = "imageID",
+          cell_id = "imageCellID",
+          exprs_values = "norm",
+          colour_by = "bcell_pos")
+
+
+plotCells(mask = E8Mask_cyto,
+          object = E8_bcell_vis,
+          img_id = "imageID",
+          cell_id = "imageCellID",
+          exprs_values = "norm",
+          colour_by = "cd3pos")
+
+
+```
+
+
+
+
+
+# Region analysis
+
+
+```{r}
+set.seed(101)
+E8_imc = lisaClust(E8_imc, k = 4, cellType = "cellTypeProtein", regionName = "regionProtein")
+
+
+# Protein region maps
+lisaClust::regionMap(E8_imc, cellType = "cellTypeProtein", region = "regionProtein")
+
+E8_imc |> 
+  ggplot(aes(x = x, y = y, col = regionProtein)) +
+  geom_point() +
+  theme_classic()
+
+all(colnames(E8_imc) == colnames(E8_xenium))
+
+E8_xenium$regionProtein = E8_imc$regionProtein
+
+
+```
+
+
+## DE analysis
+
+
+### T cells 
+```{r}
+
+tumour_xenium = E8_xenium |>
+  mutate(inTumour = ifelse(regionProtein == "region_4", 1, 0 ))
+
+
+tcell_transcripts = tumour_xenium |> 
+  filter(cellTypeTranscript %in% c("cd4t", "cd8t", "tcell"))
+
+tcell_protein = tumour_xenium |> 
+  filter(cellTypeProtein %in% c("cd4t", "cd8t"))
+
+
+
+tcell_transcript_fit = limma::lmFit(
+  assay(tcell_transcripts, "logcounts"),
+  model.matrix(~tcell_transcripts$inTumour)) |> 
+  eBayes() |> 
+  topTable(number = length(rownames(tumour_xenium)))
+
+
+tcell_protein_fit = limma::lmFit(
+  assay(tcell_protein, "logcounts"),
+  model.matrix(~tcell_protein$inTumour)) |> 
+  eBayes() |> 
+  topTable(number = length(rownames(tumour_xenium)))
+
+
+
+
+tcell_transcript_fit |> 
+  rownames_to_column("genes") |> 
+  ggplot(aes(logFC,-log10(P.Value)))+
+    geom_point(aes(colour=-log10(P.Value)), size=1) +
+    scale_colour_gradient(low="blue",high="red")+
+    xlab("log2 fold change") + ylab("-log10 p-value") +
+    gghighlight(-log10(P.Value) > 5 & abs(logFC) > 0.05, label_key = genes) +
+  theme_classic() +
+  labs(title = "Transcript T cell DE")
+
+tcell_protein_fit |> 
+  rownames_to_column("genes") |> 
+  ggplot(aes(logFC,-log10(P.Value)))+
+    geom_point(aes(colour=-log10(P.Value)), size=1) +
+    scale_colour_gradient(low="blue",high="red")+
+    xlab("log2 fold change") + ylab("-log10 p-value") +
+    gghighlight(-log10(P.Value) > 5 & abs(logFC) > 0.05, label_key = genes) +
+  theme_classic() +
+  labs(title = "Protein T cell DE")
+
+
+tcell_transcript_fit 
+
+
+
+p = tcell_transcript_fit |> 
+  rownames_to_column("genes") |> 
+  left_join(rownames_to_column(tcell_protein_fit, "genes"),  join_by("genes")) |> 
+  ggplot(aes(x = t.x, y = t.y, text = genes)) +
+  geom_point() +
+  labs(x = "Xenium t statistic", y = "IMC t statistic") +
+  gghighlight(genes %in% c("AIF1"), label_key = genes) +
+  theme_classic()
+
+
+
+data = tcell_transcript_fit |> 
+  rownames_to_column("genes") |> 
+  left_join(rownames_to_column(tcell_protein_fit, "genes"),  join_by("genes")) |> 
+  mutate(xenium = abs(t.x) > abs(t.y)) 
+  
+  
+ggplot(data, aes(x = t.x, y = t.y, col = xenium)) +
+  geom_point() +
+  labs(x = "Xenium t statistic", y = "IMC t statistic", title = "Comparing test statistics for T cell DE") +
+   geom_abline(intercept = 0, slope = 1, lty = "dashed", col = "red", alpha = 0.5) +
+  gghighlight(abs(t.x - t.y) > 2.5 & (t.x < -1 | t.x >1) & (t.y < -1 | t.y >1) , label_key = genes) +
+  theme_classic()
+
+
+ggplot(data, aes(x = t.x, y = t.y, col = xenium)) +
+  geom_point() +
+  labs(x = "Xenium t statistic", y = "IMC t statistic", title = "Comparing test statistics for T cell DE") +
+   geom_abline(intercept = 0, slope = 1, lty = "dashed", col = "red", alpha = 0.5) +
+  gghighlight(abs(t.x - t.y) > 2.5 & (P.Value.x < 0.05 | P.Value.y < 0.05) , label_key = genes,  label_params =  list(max.overlaps = Inf)) +
+  theme_classic()
+
+
+plotly::ggplotly(p)
+
+plot(tcell_transcript_fit$t, tcell_protein_fit[rownames(tcell_transcript_fit), "t"])
+
+```
+
+### T cell subset genes
+
+```{r}
+
+tcell_genes = c("CD8A", "CD4", "CD3D", "CD3E", "CD247", "TRAC", "GZMB", "GZMK", "GZMA", "PRF1", "NKG7", "CD69", "CCL5", "IL7R", "CD28", "HAVCR2", "PDCD1", "LAG3", "CTLA4", "MKI67", "BCL2L11", "FOXP3", "IL2RA", "SELL", "FGL2")
+
+tcell_transcript_fit = limma::lmFit(
+  assay(tcell_transcripts, "logcounts")[tcell_genes, ],
+  model.matrix(~tcell_transcripts$inTumour)) |> 
+  eBayes() |> 
+  topTable(number = length(tcell_genes))
+
+
+tcell_protein_fit = limma::lmFit(
+  assay(tcell_protein, "logcounts")[tcell_genes, ],
+  model.matrix(~tcell_protein$inTumour)) |> 
+  eBayes() |> 
+  topTable(number = length(tcell_genes))
+
+
+tcell_transcript_fit |> 
+  rownames_to_column("genes") |> 
+  ggplot(aes(logFC,-log10(P.Value)))+
+    geom_point(aes(colour=-log10(P.Value)), size=1) +
+    scale_colour_gradient(low="blue",high="red")+
+    xlab("log2 fold change") + ylab("-log10 p-value") +
+    gghighlight(-log10(P.Value) > 3 & abs(logFC) > 0.05, label_key = genes) +
+  theme_classic() +
+  labs(title = "Transcript T cell DE (T cell genes)")
+
+tcell_protein_fit |> 
+  rownames_to_column("genes") |> 
+  ggplot(aes(logFC,-log10(P.Value)))+
+    geom_point(aes(colour=-log10(P.Value)), size=1) +
+    scale_colour_gradient(low="blue",high="red")+
+    xlab("log2 fold change") + ylab("-log10 p-value") +
+    gghighlight(-log10(P.Value) >3 & abs(logFC) > 0.05, label_key = genes) +
+  theme_classic() +
+  labs(title = "Protein T cell DE (T cell genes)")
+
+```
+
+
+
+
+
+### b cells 
+```{r}
+
+tumour_xenium = E8_xenium |>
+  mutate(inTumour = ifelse(regionProtein == "region_4", 1, 0 ))
+
+
+bcell_transcripts = tumour_xenium |> 
+  filter(cellTypeTranscript == "b")
+
+bcell_protein = tumour_xenium |> 
+  filter(cellTypeProtein == "b")
+
+
+bcell_transcript_fit = limma::lmFit(
+  assay(bcell_transcripts, "logcounts"),
+  model.matrix(~bcell_transcripts$inTumour)) |> 
+  eBayes() |> 
+  topTable(number = length(rownames(tumour_xenium)))
+
+
+bcell_protein_fit = limma::lmFit(
+  assay(bcell_protein, "logcounts"),
+  model.matrix(~bcell_protein$inTumour)) |> 
+  eBayes() |> 
+  topTable(number = length(rownames(tumour_xenium)))
+
+
+
+
+bcell_transcript_fit |> 
+  rownames_to_column("genes") |> 
+  ggplot(aes(logFC,-log10(P.Value)))+
+    geom_point(aes(colour=-log10(P.Value)), size=1) +
+    scale_colour_gradient(low="blue",high="red")+
+    xlab("log2 fold change") + ylab("-log10 p-value") +
+    gghighlight(-log10(P.Value) > 5 & abs(logFC) > 0.05, label_key = genes) +
+  theme_classic() +
+  labs(title = "Transcript B cell DE")
+
+bcell_protein_fit |> 
+  rownames_to_column("genes") |> 
+  ggplot(aes(logFC,-log10(P.Value)))+
+    geom_point(aes(colour=-log10(P.Value)), size=1) +
+    scale_colour_gradient(low="blue",high="red")+
+    xlab("log2 fold change") + ylab("-log10 p-value") +
+    gghighlight(-log10(P.Value) > 5 & abs(logFC) > 0.05, label_key = genes) +
+  theme_classic() +
+  labs(title = "Protein B cell DE")
+
+
+```
+
+
+
+
+
+### b cells subset genes
+```{r}
+bcell_genes = c( "MS4A1", "CD19", "CD79A", "BANK1", "TCL1A", "CD34", "CD86", "CD27", "CD69", "FAS", "MKI67", "PCNA", "CXCR4", "MYC", "CD83")
+
+
+bcell_transcript_fit = limma::lmFit(
+  assay(bcell_transcripts, "logcounts")[bcell_genes, ],
+  model.matrix(~bcell_transcripts$inTumour)) |> 
+  eBayes() |> 
+  topTable(number = length(bcell_genes))
+
+
+bcell_protein_fit = limma::lmFit(
+  assay(bcell_protein, "logcounts")[bcell_genes, ],
+  model.matrix(~bcell_protein$inTumour)) |> 
+  eBayes() |> 
+  topTable(number = length(bcell_genes))
+
+
+
+bcell_transcript_fit |> 
+  rownames_to_column("genes") |> 
+  ggplot(aes(logFC,-log10(P.Value)))+
+    geom_point(aes(colour=-log10(P.Value)), size=1) +
+    scale_colour_gradient(low="blue",high="red")+
+    xlab("log2 fold change") + ylab("-log10 p-value") +
+    gghighlight(-log10(P.Value) > 3 & abs(logFC) > 0.05, label_key = genes) +
+  theme_classic() +
+  labs(title = "Transcript B cell DE (B cell genes)")
+
+bcell_protein_fit |> 
+  rownames_to_column("genes") |> 
+  ggplot(aes(logFC,-log10(P.Value)))+
+    geom_point(aes(colour=-log10(P.Value)), size=1) +
+    scale_colour_gradient(low="blue",high="red")+
+    xlab("log2 fold change") + ylab("-log10 p-value") +
+    gghighlight(-log10(P.Value) > 3& abs(logFC) > 0.05, label_key = genes) +
+  theme_classic() +
+  labs(title = "Protein B cell DE (B cell genes)")
+
+
+```
+
+
+
+```{r}
+E8_imc |> 
+  filter(cellTypeProtein == "cd8t") |> 
+  pull(regionProtein) |> table()
+
+
+CD8_xenium = E8_xenium |> 
+  filter(cellTypeProtein== "cd8t") |> 
+  mutate(inTumour = ifelse(regionProtein == "region_4", 1, 0 ))
+
+
+E8_tumour_DEG = scran::findMarkers(tumour_xenium, groups=tumour_xenium$regionProtein, direction="up", assay.type = "logcounts")
+# select for a few markers per cluster
+top <- lapply(E8_tumour_DEG, \(df) rownames(df)[df$Top <= 20])
+top
+
+#notTumourGenes = rownames(CD8_xenium)[!(rownames(CD8_xenium) %in% tumour_genes)]
+notTumourGenes = rownames(CD8_xenium)[!(rownames(CD8_xenium) %in% top$region_4)]
+
+
+CD8_assay = assay(CD8_xenium, "logcounts")[notTumourGenes,]
+design_mat = model.matrix(~CD8_xenium$inTumour)
+
+fit = limma::lmFit(CD8_assay, design_mat) |> 
+  eBayes()
+
+
+DE_results = topTable(fit, number = nrow(fit))
+
+
+DE_results |> 
+  rownames_to_column("genes") |> 
+  ggplot(aes(logFC,-log10(P.Value)))+
+    geom_point(aes(colour=-log10(P.Value)), size=1) +
+    scale_colour_gradient(low="blue",high="red")+
+    xlab("log2 fold change") + ylab("-log10 p-value") +
+    gghighlight(-log10(P.Value) > 2 & abs(logFC) > 0.05, label_key = genes) +
+  theme_classic()
+
+```
+
+## Examining just T cell genes
+
+```{r fig.height= 10}
+cd8_genes = c( "CD8A", "CD3D", "CD3E", "CD247", "TRAC", "GZMB", "GZMK", "GZMA", "PRF1", "NKG7", "CD69", "CCL5", "IL7R", "CD28", "HAVCR2", "PDCD1", 'LAG3', 'CTLA4', 'MKI67', 'BCL2L11')
+
+tumour_xenium = E8_xenium |>
+  mutate(inTumour = ifelse(regionProtein == "region_4", "In tumour", "Out of tumour" )) |> 
+  filter(cellTypeProtein == "cd8t") 
+
+
+tumour_assay = assay(tumour_xenium, "logcounts")[cd8_genes, ]
+design_mat = model.matrix(~tumour_xenium$inTumour)
+
+fit = limma::lmFit(tumour_assay, design_mat) |> 
+  eBayes()
+
+
+tumour_DE = topTable(fit, number = nrow(fit))
+
+tumour_genes = rownames(head(tumour_DE, 20))
+
+tumour_DE |> 
+  rownames_to_column("genes") |> 
+  ggplot(aes(logFC,-log10(P.Value)))+
+    geom_point(aes(colour=-log10(P.Value)), size=1) +
+    scale_colour_gradient(low="blue",high="red")+
+    xlab("log2 fold change") + ylab("-log10 p-value") +
+    gghighlight(-log10(P.Value) > 100 & abs(logFC) > 0.05, label_key = genes) +
+  theme_classic()
+
+
+
+plot = scater::plotGroupedHeatmap(
+  tumour_xenium,
+  features = cd8_genes,
+  group = "inTumour",
+  exprs_values = "logcounts",
+  center = FALSE,
+  scale = FALSE,
+  cluster_rows = TRUE,
+  block = "inTumour",
+  fontsize_row  = 8
+)
+
+
+
+
+
+
+tumour_xenium = E8_xenium |>
+  mutate(inTumour = ifelse(regionProtein == "region_4", "In tumour", "Out of tumour" )) |> 
+  filter(cellTypeProtein == "cd8t")  |> 
+  join_features(cd8_genes)
+
+ggplot(tumour_xenium, aes(x = inTumour, y = .abundance_logcounts)) +
+  geom_'boxplot'() +
+  facet_wrap(~.feature) +
+  theme_classic() 
+
+
+
+E8_xenium$cellTypeTranscript |> table()
+E8_xenium$cellTypeProtein |> table()
+
+# get de genes in protein and transcripts 
+```
+
+
+# Comparing t cells in xenium
+
+```{r fig.height=10}
+
+
+
+plot = scater::plotGroupedHeatmap(
+  E8_xenium,
+  features = rownames(E8_xenium),
+  group = "cellTypeProtein",
+  exprs_values = "logcounts",
+  center = TRUE,
+  scale = TRUE,
+  zlim = c(-3, 3),
+  cluster_rows = TRUE,
+  block = "cellTypeProtein",
+  fontsize_row  = 8
+) 
+
+
+plot = scater::plotGroupedHeatmap(
+  E8_imc,
+  features = rownames(E8_imc),
+  group = "cellTypeTranscript",
+  exprs_values = "norm",
+  center = TRUE,
+  scale = TRUE,
+  zlim = c(-3, 3),
+  cluster_rows = TRUE,
+  block = "cellTypeTranscript",
+  fontsize_row  = 10
+) 
+
+ggsave("cellTypeProtein_genes_heatmap.pdf",plot,  height = 40, width = 5)
+
+```
+
+
+
+
+```{r fig.height = 10}
+tcellSCE = E8_xenium |> 
+  filter(cellTypeTranscript %in% c("cd8t", "cd4t", "tcell") | cellTypeProtein %in% c("cd8t", "cd4t"))
+
+
+E8_imc |> 
+  filter(cellTypeProtein %in% c("cd8t", "cd4t") & !(cellTypeTranscript %in% c("cd8t", "cd4t", "tcell")) ) |> 
+  scater::plotGroupedHeatmap(
+  features = rownames(E8_imc),
+  group = "cellTypeTranscript",
+  exprs_values = "norm",
+  center = TRUE,
+  scale = TRUE,
+  zlim = c(-3, 3),
+  cluster_rows = TRUE,
+  block = "cellTypeTranscript",
+  fontsize_row  = 10
+) 
+
+
+E8_imc |> 
+  filter(!cellTypeProtein %in% c("cd8t", "cd4t") & cellTypeTranscript %in% c("cd8t", "cd4t", "tcell")) |> 
+  scater::plotGroupedHeatmap(
+  features = rownames(E8_imc),
+  group = "cellTypeTranscript",
+  exprs_values = "norm",
+  center = TRUE,
+  scale = TRUE,
+  zlim = c(-3, 3),
+  cluster_rows = TRUE,
+  block = "cellTypeTranscript",
+  fontsize_row  = 10
+) 
+
+
+
+
+E8_xenium |> 
+  filter(cellTypeTranscript %in% c("cd8t", "cd4t", "tcell") & !(cellTypeProtein %in% c("cd8t", "cd4t")) ) |> 
+  scater::plotGroupedHeatmap(
+  features = rownames(E8_xenium),
+  group = "cellTypeProtein",
+  exprs_values = "logcounts",
+  center = TRUE,
+  scale = TRUE,
+  zlim = c(-3, 3),
+  cluster_rows = TRUE,
+  block = "cellTypeProtein",
+  fontsize_row  = 10
+) 
+```
+
+```{r fig.height= 10}
+E8_xenium |>
+  mutate(tcellTechnologies = case_when(
+    cellTypeTranscript %in% c("cd8t", "cd4t", "tcell") & cellTypeProtein %in% c("cd8t", "cd4t") ~ "both",
+     cellTypeTranscript %in% c("cd8t", "cd4t", "tcell") & !(cellTypeProtein %in% c("cd8t", "cd4t")) ~ "xenium",
+     !(cellTypeTranscript %in% c("cd8t", "cd4t", "tcell")) & (cellTypeProtein %in% c("cd8t", "cd4t")) ~ "imc",
+    TRUE ~ "other"
+  )) |> 
+  scater::plotGroupedHeatmap(
+  features = rownames(E8_xenium),
+  group = "tcellTechnologies",
+  exprs_values = "logcounts",
+  center = TRUE,
+  scale = TRUE,
+  zlim = c(-3, 3),
+  cluster_rows = TRUE,
+  block = "tcellTechnologies",
+  fontsize_row  = 10
+) 
+
+
+E8_imc |>
+  mutate(tcellTechnologies = case_when(
+    cellTypeTranscript %in% c("cd8t", "cd4t", "tcell") & cellTypeProtein %in% c("cd8t", "cd4t") ~ "both",
+     cellTypeTranscript %in% c("cd8t", "cd4t", "tcell") & !(cellTypeProtein %in% c("cd8t", "cd4t")) ~ "xenium",
+     !(cellTypeTranscript %in% c("cd8t", "cd4t", "tcell")) & (cellTypeProtein %in% c("cd8t", "cd4t")) ~ "imc",
+    TRUE ~ "other"
+  )) |> 
+  scater::plotGroupedHeatmap(
+  features = rownames(E8_imc),
+  group = "tcellTechnologies",
+  exprs_values = "norm",
+  center = TRUE,
+  scale = TRUE,
+  zlim = c(-3, 3),
+  cluster_rows = TRUE,
+  block = "tcellTechnologies",
+  fontsize_row  = 10
+) 
+  
+
+
+
+E8_tcellTech = E8_xenium |>
+  mutate(tcellTechnologies = case_when(
+    cellTypeTranscript %in% c("cd8t", "cd4t", "tcell") & cellTypeProtein %in% c("cd8t", "cd4t") ~ "both",
+     cellTypeTranscript %in% c("cd8t", "cd4t", "tcell") & !(cellTypeProtein %in% c("cd8t", "cd4t")) ~ "xenium",
+     !(cellTypeTranscript %in% c("cd8t", "cd4t", "tcell")) & (cellTypeProtein %in% c("cd8t", "cd4t")) ~ "imc",
+    TRUE ~ "other"
+  ))
+
+
+E8_tcellTech_imc = E8_imc |>
+  mutate(tcellTechnologies = case_when(
+    cellTypeTranscript %in% c("cd8t", "cd4t", "tcell") & cellTypeProtein %in% c("cd8t", "cd4t") ~ "both",
+     cellTypeTranscript %in% c("cd8t", "cd4t", "tcell") & !(cellTypeProtein %in% c("cd8t", "cd4t")) ~ "xenium",
+     !(cellTypeTranscript %in% c("cd8t", "cd4t", "tcell")) & (cellTypeProtein %in% c("cd8t", "cd4t")) ~ "imc",
+    TRUE ~ "other"
+  )) 
+
+
+E8_tcellTech_imc_noOther = E8_tcellTech_imc |> 
+  filter(tcellTechnologies != "other")
+
+mgs <- scran::findMarkers(E8_tcellTech_imc_noOther, groups=E8_tcellTech_imc_noOther$tcellTechnologies, direction="up", assay.type = "norm")
+
+top <- lapply(mgs, \(df) rownames(df)[df$Top <= 5])
+top
+
+
+
+E8_tcellTech_noOther = E8_tcellTech |> 
+  filter(tcellTechnologies != "other")
+
+mgs <- scran::findMarkers(E8_tcellTech_noOther, groups=E8_tcellTech_noOther$tcellTechnologies, direction="up", assay.type = "logcounts")
+
+top <- lapply(mgs, \(df) rownames(df)[df$Top <= 5])
+top
+
+
+```
+
+
+## T cell in and out of tumour heatmap
+```{r fig.height=6, dpi = 300}
+
+
+tcell_genes = c( "FOXP3", "GZMB", "LAG3",  "PDCD1", "MKI67", "CD3E")
+
+
+
+Xenium_heatmapData = E8_xenium |>
+  mutate(tcellTechnologies = case_when(
+    cellTypeTranscript %in% c("cd8t", "cd4t", "tcell") & cellTypeProtein %in% c("cd8t", "cd4t") ~ "both",
+     cellTypeTranscript %in% c("cd8t", "cd4t", "tcell") & !(cellTypeProtein %in% c("cd8t", "cd4t")) ~ "xenium",
+     !(cellTypeTranscript %in% c("cd8t", "cd4t", "tcell")) & (cellTypeProtein %in% c("cd8t", "cd4t")) ~ "imc",
+    TRUE ~ "other"
+  )) |> 
+  filter(tcellTechnologies != "other") |> 
+  mutate(Location = ifelse(regionProtein == "region_4", "Inside tumour", "Outside Tumour") ) |> 
+  mutate(tcellTechnologiesTumour = ifelse(regionProtein == "region_4", paste(tcellTechnologies, "inTumour", sep = "_"), paste(tcellTechnologies, "outTumour", sep = "_") )) 
+
+
+Xenium_annotation = Xenium_heatmapData |> 
+  dplyr::select(tcellTechnologies, tcellTechnologiesTumour, Location) |> 
+  data.frame() |> 
+  unique() |> 
+  rownames_to_column("rowname") |> 
+  dplyr::select(-rowname) |> 
+  column_to_rownames("tcellTechnologiesTumour") |> 
+  rename("") |> 
+  mutate(`T cell labelled by IMC` = ifelse(tcellTechnologies %in% c("imc", "both"), "TRUE", "FALSE"),
+         `T cell labelled by Xenium` = ifelse(tcellTechnologies %in% c("xenium", "both"), "TRUE", "FALSE")) |> 
+  select(-tcellTechnologies) |> 
+  mutate(Location = as.factor(Location)) |> 
+  relocate(Location, .after = last_col())
+
+
+Xenium_heatmap = scater::plotGroupedHeatmap(
+  Xenium_heatmapData,
+  features = tcell_genes,
+  group = "tcellTechnologiesTumour",
+  exprs_values = "logcounts",
+  center = TRUE,
+  scale = TRUE,
+  zlim = c(-3, 3),
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  block = "tcellTechnologiesTumour",
+  fontsize_row  = 10,
+  label_col = FALSE,
+  annotation_col = Xenium_annotation,
+  labels_col = ""
+) 
+
+
+
+ggsave("Tcell_heatmap_transcripts.pdf", plot = Xenium_heatmap, height = 7, width = 8)
+```
+
+
+```{r fig.height=6, dpi = 300}
+tcell_proteins = c( "FoxP3", "GranzymeB", "Lag3", "PD1", "Ki67", "CD3")
+
+IMC_heatmapData = E8_imc |>
+  mutate(tcellTechnologies = case_when(
+    cellTypeTranscript %in% c("cd8t", "cd4t", "tcell") & cellTypeProtein %in% c("cd8t", "cd4t") ~ "both",
+     cellTypeTranscript %in% c("cd8t", "cd4t", "tcell") & !(cellTypeProtein %in% c("cd8t", "cd4t")) ~ "xenium",
+     !(cellTypeTranscript %in% c("cd8t", "cd4t", "tcell")) & (cellTypeProtein %in% c("cd8t", "cd4t")) ~ "imc",
+    TRUE ~ "other"
+  )) |> 
+  filter(tcellTechnologies != "other") |> 
+  mutate(Location = ifelse(regionProtein == "region_4", "Inside tumour", "Outside Tumour") ) |> 
+  mutate(tcellTechnologiesTumour = ifelse(regionProtein == "region_4", paste(tcellTechnologies, "inTumour", sep = "_"), paste(tcellTechnologies, "outTumour", sep = "_") )) 
+
+
+
+IMC_annotation = IMC_heatmapData |> 
+  dplyr::select(tcellTechnologies, tcellTechnologiesTumour, Location) |> 
+  data.frame() |> 
+  unique() |> 
+  rownames_to_column("rowname") |> 
+  dplyr::select(-rowname) |> 
+  column_to_rownames("tcellTechnologiesTumour") |> 
+  rename("") |> 
+  mutate(`T cell labelled by IMC` = ifelse(tcellTechnologies %in% c("imc", "both"), "TRUE", "FALSE"),
+         `T cell labelled by Xenium` = ifelse(tcellTechnologies %in% c("xenium", "both"), "TRUE", "FALSE")) |> 
+  select(-tcellTechnologies) |> 
+  mutate(Location = as.factor(Location)) |> 
+  relocate(Location, .after = last_col())
+
+
+
+IMC_heatmap = scater::plotGroupedHeatmap(
+  IMC_heatmapData,
+  features = tcell_proteins,
+  group = "tcellTechnologiesTumour",
+  exprs_values = "norm",
+  center = TRUE,
+  scale = TRUE,
+  zlim = c(-3, 3),
+  cluster_rows = FALSE,
+  cluster_cols = FALSE,
+  block = "tcellTechnologiesTumour",
+  fontsize_row  = 10,
+  label_col = FALSE,
+  annotation_col = IMC_annotation,
+  labels_col = ""
+) 
+
+
+
+
+
+ggsave("Tcell_heatmap_protein.pdf", plot = IMC_heatmap, height = 7, width = 8)
+
+
+```
+
+
+
+# T cell by technology DE
+
+
+```{r}
+E8_tcellTech = E8_xenium |>
+  mutate(tcellTechnologies = case_when(
+    cellTypeTranscript %in% c("cd8t", "cd4t", "tcell") & cellTypeProtein %in% c("cd8t", "cd4t") ~ "both",
+     cellTypeTranscript %in% c("cd8t", "cd4t", "tcell") & !(cellTypeProtein %in% c("cd8t", "cd4t")) ~ "xenium",
+     !(cellTypeTranscript %in% c("cd8t", "cd4t", "tcell")) & (cellTypeProtein %in% c("cd8t", "cd4t")) ~ "imc",
+    TRUE ~ "other"
+  )) |> 
+  mutate(inTumour = ifelse(regionProtein == "region_4", 1, 0 ))
+
+
+# Filter data by technologies
+tcell_both = E8_tcellTech |> 
+  filter(tcellTechnologies == "both")
+
+tcell_imc = E8_tcellTech |> 
+  filter(tcellTechnologies == "imc")
+
+tcell_xenium = E8_tcellTech |> 
+  filter(tcellTechnologies == "xenium")
+
+
+# Fit models
+tcell_limma_both = limma::lmFit(
+  assay(tcell_both, "logcounts"),
+  model.matrix(~tcell_both$inTumour)) |> 
+  eBayes() |> 
+  topTable(number = length(rownames(tcell_both)))
+
+
+tcell_limma_imc = limma::lmFit(
+  assay(tcell_imc, "logcounts"),
+  model.matrix(~tcell_imc$inTumour)) |> 
+  eBayes() |> 
+  topTable(number = length(rownames(tcell_imc)))
+
+
+tcell_limma_xenium = limma::lmFit(
+  assay(tcell_xenium, "logcounts"),
+  model.matrix(~tcell_xenium$inTumour)) |> 
+  eBayes() |> 
+  topTable(number = length(rownames(tcell_xenium)))
+
+
+
+
+# visualise genes
+tcell_limma_both |> 
+  rownames_to_column("genes") |> 
+  ggplot(aes(logFC,-log10(P.Value)))+
+    geom_point(aes(colour=-log10(P.Value)), size=1) +
+    scale_colour_gradient(low="blue",high="red")+
+    xlab("log2 fold change") + ylab("-log10 p-value") +
+    gghighlight(-log10(P.Value) > 3 & abs(logFC) > 0.05, label_key = genes) +
+  theme_classic() +
+  labs(title = "T cells identified by both")
+
+tcell_limma_imc |> 
+  rownames_to_column("genes") |> 
+  ggplot(aes(logFC,-log10(P.Value)))+
+    geom_point(aes(colour=-log10(P.Value)), size=1) +
+    scale_colour_gradient(low="blue",high="red")+
+    xlab("log2 fold change") + ylab("-log10 p-value") +
+    gghighlight(-log10(P.Value) > 3 & abs(logFC) > 0.05, label_key = genes) +
+  theme_classic() +
+  labs(title = "T cells identified by only imc")
+
+
+tcell_limma_xenium |> 
+  rownames_to_column("genes") |> 
+  ggplot(aes(logFC,-log10(P.Value)))+
+    geom_point(aes(colour=-log10(P.Value)), size=1) +
+    scale_colour_gradient(low="blue",high="red")+
+    xlab("log2 fold change") + ylab("-log10 p-value") +
+    gghighlight(-log10(P.Value) > 3 & abs(logFC) > 0.05, label_key = genes) +
+  theme_classic() +
+  labs(title = "T cells identified by only xenium")
+```
+
